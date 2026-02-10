@@ -1,0 +1,42 @@
+services:
+  app:
+    image: ${REGISTRY:-registry.paladin.ovh}/${IMAGE_NAME:-cr-session}:${IMAGE_TAG:-latest}
+    container_name: cr-session
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+    volumes:
+      - cr_session_data:/app/backend/data
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.cr-session.rule=Host(`${TRAEFIK_HOST}`)"
+      - "traefik.http.routers.cr-session.entrypoints=websecure"
+      - "traefik.http.routers.cr-session.tls.certresolver=letsencrypt"
+      - "traefik.http.services.cr-session.loadbalancer.server.port=3001"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3001/api/health').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    restart: always
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  cr_session_data:
+
+networks:
+  default:
+    name: traefik-network
+    external: true

@@ -1,0 +1,13 @@
+{
+  "name": "cr-session",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "npm run build -w backend && npm run build -w frontend",
+    "validate": "npm run build"
+  },
+  "workspaces": [
+    "backend",
+    "frontend"
+  ]
+}
