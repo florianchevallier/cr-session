@@ -3,11 +3,20 @@
 FROM node:22-slim AS deps
 WORKDIR /app
 
+# Install build dependencies for native modules
+RUN apt-get update && apt-get install -y \
+    python3 \
+    make \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY package.json package-lock.json ./
 COPY backend/package.json ./backend/package.json
 COPY frontend/package.json ./frontend/package.json
 
 RUN npm ci --ignore-scripts
+# Rebuild native modules for Linux
+RUN npm rebuild better-sqlite3
 
 FROM deps AS builder
 WORKDIR /app
