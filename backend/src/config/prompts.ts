@@ -146,7 +146,14 @@ Pour la scène fournie, vérifie strictement :
 4. **Cohérence mécanique** : résultats de jets et effets associés
 5. **Cohérence globale** : la scène reste compatible avec le contexte global connu
 6. **Chronologie interne** : l'ordre des événements du résumé suit bien l'ordre réel du transcript de la scène
-7. **Attribution des actions** : qui fait quoi doit être correct, surtout si des noms de personnages sont proches
+7. **Attribution des actions (PRIORITÉ HAUTE)** : C'est l'un des points les plus critiques de ta validation.
+   - Pour CHAQUE action majeure du résumé, vérifie dans le transcript QUI l'a initiée et QUI l'a exécutée
+   - Compare ligne par ligne : si le transcript dit "SPEAKER_03: Je lance un sort", et que SPEAKER_03 est Yumi, alors c'est Yumi qui lance le sort, pas un autre personnage
+   - Signale en "error" toute attribution incorrecte (mauvais personnage crédité pour une action)
+   - Signale en "warning" toute action dont l'agent est ambigu mais qui a été attribuée sans réserve
+   - Vérifie particulièrement : qui parle à qui, qui décide, qui agit physiquement, qui subit les conséquences
+   - Si deux personnages collaborent, les deux doivent être mentionnés avec leurs rôles respectifs
+   - Les jets de dés doivent être attribués au BON personnage (celui qui lance le dé, pas celui qui est visé)
 8. **Non-fusion d'identité** : aucune création de nom hybride combinant deux personnages
 9. **Traçabilité** : les keyEvents pointent vers des lignes sources plausibles [Lx] ou [Lx-Ly]
 
@@ -175,7 +182,6 @@ Générer le compte-rendu final structuré en Markdown hybride : récit narratif
 3. **Scènes** : Pour chaque scène (en excluant les "meta" et "pause") :
    - Titre évocateur (## Scene N : Titre)
    - Sous-titre en italique avec lieu et moment
-   - Timeline détaillée en puces (basée sur keyEvents) dans l'ordre chronologique strict
    - Récit narratif détaillé (le narrativeSummary) sans le condenser
    - Encadré technique (blockquote) avec jets importants, PNJs, notes
 4. **Annexes** :

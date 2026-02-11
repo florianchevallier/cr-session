@@ -67,8 +67,10 @@ export async function validatorNode(
   log("Début nœud: validator", {
     scenesCount: scenesToValidate,
     batchSize: VALIDATION_CONCURRENCY,
+    retryCount: state.retryCount,
+    pendingSceneIds: state.pendingSceneIds,
   });
-  const model = createModel("pro", 0.1);
+  const model = createModel("flash", 0.1);
   const writer = getWriter();
 
   const entitiesStr = JSON.stringify(state.entities, null, 2);
@@ -89,6 +91,12 @@ export async function validatorNode(
 
   const structuredModel = model.withStructuredOutput(PerSceneValidationSchema);
 
+  // On retry, only validate scenes that were re-summarized (pendingSceneIds)
+  const sceneIdsToValidate =
+    state.retryCount > 0 && state.pendingSceneIds.length > 0
+      ? new Set(state.pendingSceneIds)
+      : null;
+
   const scenesWithSummaries = state.sceneSummaries
     .map((summary) => ({
       summary,
@@ -100,9 +108,16 @@ export async function validatorNode(
         scene: (typeof state.scenes)[number];
       } => !!entry.scene
     )
-    .filter((entry) => entry.scene.type !== "meta" && entry.scene.type !== "pause");
+    .filter((entry) => entry.scene.type !== "meta" && entry.scene.type !== "pause")
+    .filter((entry) => !sceneIdsToValidate || sceneIdsToValidate.has(entry.scene.id));
 
-  const aggregatedIssues: z.infer<typeof ValidationReportSchema>["issues"] = [];
+  // Carry forward issues from scenes not being re-validated
+  const aggregatedIssues: z.infer<typeof ValidationReportSchema>["issues"] =
+    sceneIdsToValidate
+      ? state.validationReport.issues.filter(
+          (i) => i.sceneId != null && !sceneIdsToValidate.has(i.sceneId)
+        )
+      : [];
 
   const batches = chunkArray(scenesWithSummaries, VALIDATION_CONCURRENCY);
   for (const batch of batches) {
@@ -150,8 +165,13 @@ export async function validatorNode(
               `4. Cohérence mécanique (jets, conséquences)\n` +
               `5. Clarté et complétude narrative\n` +
               `6. Chronologie stricte: le résumé suit l'ordre réel des événements dans cette scène\n` +
-              `7. Attribution des actions: qui initie et qui exécute chaque action majeure\n` +
-              `8. Interdiction de fusion d'identité (ex: combinaison de 2 personnages dans un nom hybride)\n\n` +
+              `7. ⚠️ ATTRIBUTION DES ACTIONS (CRITIQUE): Pour CHAQUE action majeure mentionnée dans le résumé:\n` +
+              `   - Identifie dans le transcript source QUEL speaker/personnage réalise cette action\n` +
+              `   - Vérifie que le résumé attribue l'action au BON personnage\n` +
+              `   - Si l'attribution est incorrecte, c'est une "error"\n` +
+              `   - Vérifie aussi: qui parle, qui décide, qui agit, qui subit, qui lance les dés\n` +
+              `   - Les jets de dés doivent être attribués au personnage qui lance, pas à la cible\n` +
+              `8. Interdiction de fusion d'identité (ex: combinaison de 2 personnages dans un nom hybride)\n` +
               `9. Traçabilité: les keyEvents pointent vers des lignes plausibles [Lx] ou [Lx-Ly]\n\n` +
               `Retourne uniquement le JSON structuré demandé.`
           ),

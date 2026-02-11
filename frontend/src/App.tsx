@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { Scroll, Sparkles, AlertCircle } from "lucide-react";
 import DropZone from "./components/DropZone";
 import UniverseSelector from "./components/UniverseSelector";
@@ -6,17 +6,23 @@ import PlayerForm from "./components/PlayerForm";
 import ProgressPanel from "./components/ProgressPanel";
 import ReportViewer from "./components/ReportViewer";
 import ReportHistoryPanel from "./components/ReportHistoryPanel";
+import ProcessingJobsPanel from "./components/ProcessingJobsPanel";
 import { useSSE } from "./hooks/useSSE";
-import { checkHealth } from "./lib/api";
-import type { PlayerInfo, ProcessConfig } from "./lib/api";
 import {
-  createReportHistoryEntry,
-  deleteHistoryItem,
-  loadReportHistory,
-  prependHistoryItem,
-  saveReportHistory,
-} from "./lib/reportHistory";
-import type { ReportHistoryItem } from "./lib/reportHistory";
+  checkHealth,
+  listProcessJobs,
+  fetchReports,
+  fetchReport,
+  deleteReportApi,
+  correctReport,
+} from "./lib/api";
+import type {
+  PlayerInfo,
+  ProcessConfig,
+  ProcessJobSummary,
+  ReportSummary,
+  ReportDetail,
+} from "./lib/api";
 
 type AppStep = "config" | "processing" | "result";
 
@@ -31,11 +37,15 @@ export default function App() {
   const [players, setPlayers] = useState<PlayerInfo[]>([
     { playerName: "", characterName: "", speakerHint: "" },
   ]);
-  const [reportHistory, setReportHistory] = useState<ReportHistoryItem[]>([]);
+  const [runningJobs, setRunningJobs] = useState<ProcessJobSummary[]>([]);
+
+  // Report state (SQLite-backed)
+  const [reportHistory, setReportHistory] = useState<ReportSummary[]>([]);
   const [activeReportId, setActiveReportId] = useState<string | null>(null);
-  const [historyStorageError, setHistoryStorageError] = useState<string | null>(
-    null
-  );
+  const [activeReport, setActiveReport] = useState<ReportDetail | null>(null);
+  const [isCorrecting, setIsCorrecting] = useState(false);
+  const [reportError, setReportError] = useState<string | null>(null);
+
   const handledResultDataRef = useRef<Record<string, unknown> | null>(null);
 
   // Health
@@ -50,54 +60,81 @@ export default function App() {
       .catch(() => setApiReady(false));
   }, []);
 
-  // Load history from localStorage at startup.
-  useEffect(() => {
-    const existingHistory = loadReportHistory();
-    setReportHistory(existingHistory);
-    if (existingHistory.length > 0) {
-      setActiveReportId(existingHistory[0].id);
+  // ── Load reports from API ──────────────────────────────────────────────────
+
+  const refreshReportHistory = useCallback(async () => {
+    try {
+      const reports = await fetchReports();
+      setReportHistory(reports);
+    } catch {
+      // Ignore transient errors
     }
   }, []);
 
-  // Persist every successful generation into local history.
+  useEffect(() => {
+    void refreshReportHistory();
+  }, [refreshReportHistory]);
+
+  // ── Running jobs polling ───────────────────────────────────────────────────
+
+  const refreshRunningJobs = useCallback(async () => {
+    try {
+      const jobs = await listProcessJobs(["pending", "running"]);
+      setRunningJobs(jobs);
+    } catch {
+      // Ignore transient API errors
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshRunningJobs();
+    const intervalId = window.setInterval(() => {
+      void refreshRunningJobs();
+    }, 5000);
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [refreshRunningJobs]);
+
+  useEffect(() => {
+    if (sse.activeJobId) {
+      setStep("processing");
+    }
+  }, [sse.activeJobId]);
+
+  useEffect(() => {
+    void refreshRunningJobs();
+  }, [refreshRunningJobs, sse.activeJobId, sse.isProcessing]);
+
+  // ── Handle SSE result → refresh reports ────────────────────────────────────
+
   useEffect(() => {
     if (!sse.result || !sse.resultData || sse.isProcessing) return;
     if (handledResultDataRef.current === sse.resultData) return;
 
     handledResultDataRef.current = sse.resultData;
 
-    const newHistoryItem = createReportHistoryEntry({
-      report: sse.result,
-      universeName: selectedUniverse,
-      transcriptName: file?.name,
-      players,
+    // The report was already saved to SQLite by the backend.
+    // We just need to refresh the history and show the result.
+    const reportId = sse.resultData.reportId as string | undefined;
+
+    void refreshReportHistory().then(async () => {
+      if (reportId) {
+        try {
+          const detail = await fetchReport(reportId);
+          setActiveReport(detail);
+          setActiveReportId(reportId);
+        } catch {
+          // Fallback: use the result from SSE
+          setActiveReport(null);
+          setActiveReportId(null);
+        }
+      }
+      setStep("result");
     });
+  }, [sse.result, sse.resultData, sse.isProcessing, refreshReportHistory]);
 
-    const nextHistory = prependHistoryItem(reportHistory, newHistoryItem);
-    setReportHistory(nextHistory);
-
-    try {
-      saveReportHistory(nextHistory);
-      setHistoryStorageError(null);
-    } catch {
-      setHistoryStorageError(
-        "Historique non sauvegarde: espace localStorage insuffisant."
-      );
-    }
-
-    setActiveReportId(newHistoryItem.id);
-    setStep("result");
-  }, [
-    sse.result,
-    sse.resultData,
-    sse.isProcessing,
-    selectedUniverse,
-    file,
-    players,
-    reportHistory,
-  ]);
-
-  const activeReport = reportHistory.find((item) => item.id === activeReportId);
+  // ── Actions ────────────────────────────────────────────────────────────────
 
   const handleProcess = async () => {
     if (!file) return;
@@ -119,56 +156,87 @@ export default function App() {
 
   const handleReset = () => {
     setStep("config");
+    setActiveReport(null);
   };
 
-  const handleOpenHistoryReport = (reportId: string) => {
-    setActiveReportId(reportId);
-    setStep("result");
-  };
-
-  const handleDeleteHistoryReport = (reportId: string) => {
-    const nextHistory = deleteHistoryItem(reportHistory, reportId);
-    setReportHistory(nextHistory);
-
+  const handleOpenHistoryReport = async (reportId: string) => {
     try {
-      saveReportHistory(nextHistory);
-      setHistoryStorageError(null);
+      const detail = await fetchReport(reportId);
+      setActiveReport(detail);
+      setActiveReportId(reportId);
+      setStep("result");
     } catch {
-      setHistoryStorageError(
-        "Historique partiellement mis a jour: erreur d'ecriture localStorage."
-      );
+      setReportError("Impossible de charger ce rapport.");
     }
+  };
 
-    if (activeReportId === reportId) {
-      if (nextHistory.length > 0) {
-        setActiveReportId(nextHistory[0].id);
-      } else {
+  const handleFollowJob = (jobId: string) => {
+    setStep("processing");
+    void sse.followJob(jobId);
+  };
+
+  const handleDeleteHistoryReport = async (reportId: string) => {
+    try {
+      await deleteReportApi(reportId);
+      await refreshReportHistory();
+
+      if (activeReportId === reportId) {
         setActiveReportId(null);
+        setActiveReport(null);
         if (step === "result") {
           setStep("config");
         }
       }
+    } catch {
+      setReportError("Impossible de supprimer ce rapport.");
     }
   };
 
-  const handleClearHistory = () => {
+  const handleClearHistory = async () => {
     if (!window.confirm("Supprimer tout l'historique des comptes-rendus ?")) {
       return;
     }
 
-    setReportHistory([]);
-    setActiveReportId(null);
-    if (step === "result") {
-      setStep("config");
+    try {
+      // Delete all reports one by one
+      for (const report of reportHistory) {
+        await deleteReportApi(report.id);
+      }
+      await refreshReportHistory();
+      setActiveReportId(null);
+      setActiveReport(null);
+      if (step === "result") {
+        setStep("config");
+      }
+    } catch {
+      setReportError("Erreur lors de la suppression de l'historique.");
     }
+  };
+
+  const handleCorrection = async (
+    selectedText: string,
+    instruction: string
+  ) => {
+    if (!activeReportId) return;
+    setIsCorrecting(true);
+    setReportError(null);
 
     try {
-      saveReportHistory([]);
-      setHistoryStorageError(null);
-    } catch {
-      setHistoryStorageError(
-        "Impossible de vider l'historique dans localStorage."
+      const result = await correctReport(
+        activeReportId,
+        selectedText,
+        instruction
       );
+      // Update the active report with the corrected content
+      setActiveReport((prev) =>
+        prev ? { ...prev, reportMd: result.reportMd } : prev
+      );
+    } catch (err) {
+      setReportError(
+        err instanceof Error ? err.message : "Erreur lors de la correction."
+      );
+    } finally {
+      setIsCorrecting(false);
     }
   };
 
@@ -194,9 +262,28 @@ export default function App() {
           <div>
             <p className="font-medium">Clef API manquante</p>
             <p className="text-xs mt-0.5">
-              Configure ta <code className="rounded bg-amber-100 px-1">GOOGLE_API_KEY</code> dans le
-              fichier <code className="rounded bg-amber-100 px-1">.env</code> pour utiliser Gemini.
+              Configure ta{" "}
+              <code className="rounded bg-amber-100 px-1">GOOGLE_API_KEY</code>{" "}
+              dans le fichier{" "}
+              <code className="rounded bg-amber-100 px-1">.env</code> pour
+              utiliser Gemini.
             </p>
+          </div>
+        </div>
+      )}
+
+      {/* Report error */}
+      {reportError && (
+        <div className="mb-6 flex items-start gap-2 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800">
+          <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+          <div>
+            <p>{reportError}</p>
+            <button
+              onClick={() => setReportError(null)}
+              className="mt-1 text-xs underline"
+            >
+              Fermer
+            </button>
           </div>
         </div>
       )}
@@ -205,7 +292,6 @@ export default function App() {
       {step === "config" && (
         <div className="space-y-5">
           <DropZone file={file} onFileChange={setFile} />
-
           <UniverseSelector
             selectedUniverse={selectedUniverse}
             universeContext={universeContext}
@@ -222,7 +308,6 @@ export default function App() {
               );
             }}
           />
-
           <PlayerForm players={players} onChange={setPlayers} />
 
           {/* Submit */}
@@ -250,7 +335,10 @@ export default function App() {
           />
 
           {sse.error && (
-            <button onClick={handleReset} className="btn-secondary w-full justify-center">
+            <button
+              onClick={handleReset}
+              className="btn-secondary w-full justify-center"
+            >
               Retour
             </button>
           )}
@@ -260,7 +348,12 @@ export default function App() {
       {/* Result step */}
       {step === "result" && activeReport && (
         <div className="space-y-5">
-          <ReportViewer report={activeReport.report} />
+          <ReportViewer
+            report={activeReport.reportMd}
+            reportId={activeReport.id}
+            onCorrection={handleCorrection}
+            isCorrecting={isCorrecting}
+          />
 
           <div className="flex justify-center pt-4">
             <button onClick={handleReset} className="btn-secondary">
@@ -270,7 +363,25 @@ export default function App() {
         </div>
       )}
 
-      <div className="mt-5">
+      {/* Fallback: SSE result without reportId (old flow) */}
+      {step === "result" && !activeReport && sse.result && (
+        <div className="space-y-5">
+          <ReportViewer report={sse.result} />
+
+          <div className="flex justify-center pt-4">
+            <button onClick={handleReset} className="btn-secondary">
+              Nouvelle session
+            </button>
+          </div>
+        </div>
+      )}
+
+      <div className="mt-5 space-y-5">
+        <ProcessingJobsPanel
+          jobs={runningJobs}
+          activeJobId={sse.activeJobId}
+          onFollowJob={handleFollowJob}
+        />
         <ReportHistoryPanel
           history={reportHistory}
           activeReportId={activeReportId}
@@ -278,7 +389,7 @@ export default function App() {
           onDeleteReport={handleDeleteHistoryReport}
           onClearHistory={handleClearHistory}
           openDisabled={sse.isProcessing}
-          storageError={historyStorageError}
+          storageError={reportError}
         />
       </div>
     </div>

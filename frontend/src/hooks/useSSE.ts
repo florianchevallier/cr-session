@@ -1,4 +1,5 @@
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
+import { createProcessJob } from "../lib/api";
 import type { ProcessConfig } from "../lib/api";
 
 export interface StepEvent {
@@ -8,6 +9,7 @@ export interface StepEvent {
 }
 
 export interface SSEState {
+  activeJobId: string | null;
   isProcessing: boolean;
   steps: StepEvent[];
   currentStep: string | null;
@@ -44,8 +46,26 @@ function upsertStep(
   );
 }
 
+const ACTIVE_JOB_STORAGE_KEY = "cr-session.active-job-id.v1";
+
+function saveActiveJobId(jobId: string | null): void {
+  if (typeof window === "undefined") return;
+  if (!jobId) {
+    window.localStorage.removeItem(ACTIVE_JOB_STORAGE_KEY);
+    return;
+  }
+  window.localStorage.setItem(ACTIVE_JOB_STORAGE_KEY, jobId);
+}
+
+function loadActiveJobId(): string | null {
+  if (typeof window === "undefined") return null;
+  const value = window.localStorage.getItem(ACTIVE_JOB_STORAGE_KEY);
+  return value && value.trim() ? value.trim() : null;
+}
+
 export function useSSE() {
   const [state, setState] = useState<SSEState>({
+    activeJobId: null,
     isProcessing: false,
     steps: [],
     currentStep: null,
@@ -55,79 +75,9 @@ export function useSSE() {
   });
 
   const abortRef = useRef<AbortController | null>(null);
+  const connectionRef = useRef(0);
 
-  const process = useCallback(async (config: ProcessConfig) => {
-    // Reset state
-    setState({
-      isProcessing: true,
-      steps: [],
-      currentStep: null,
-      result: null,
-      resultData: null,
-      error: null,
-    });
-
-    // Build FormData
-    const formData = new FormData();
-    formData.append("transcript", config.transcript);
-    formData.append("universeName", config.universeName);
-    formData.append("universeContext", config.universeContext);
-    formData.append("sessionHistory", config.sessionHistory);
-    formData.append("playerInfo", JSON.stringify(config.playerInfo));
-
-    abortRef.current = new AbortController();
-
-    try {
-      const response = await fetch("/api/process", {
-        method: "POST",
-        body: formData,
-        signal: abortRef.current.signal,
-      });
-
-      if (!response.ok || !response.body) {
-        throw new Error(`HTTP ${response.status}`);
-      }
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-
-        let eventType: string | null = null;
-
-        for (const line of lines) {
-          if (line.startsWith("event: ")) {
-            eventType = line.slice(7).trim();
-          } else if (line.startsWith("data: ") && eventType) {
-            try {
-              const data = JSON.parse(line.slice(6));
-              handleEvent(eventType, data);
-            } catch {
-              // skip invalid JSON
-            }
-            eventType = null;
-          }
-        }
-      }
-    } catch (err) {
-      if ((err as Error).name !== "AbortError") {
-        setState((prev) => ({
-          ...prev,
-          isProcessing: false,
-          error: (err as Error).message,
-        }));
-      }
-    }
-  }, []);
-
-  const handleEvent = (type: string, data: Record<string, unknown>) => {
+  const handleEvent = useCallback((type: string, data: Record<string, unknown>) => {
     switch (type) {
       case "step:scenes": {
         const group = data.group === "validator" ? "validator" : "summarizer";
@@ -225,21 +175,192 @@ export function useSSE() {
         break;
 
       case "error":
+        saveActiveJobId(null);
         setState((prev) => ({
           ...prev,
+          activeJobId: null,
+          isProcessing: false,
+          currentStep: null,
           error: data.message as string,
         }));
         break;
 
       case "done":
+        saveActiveJobId(null);
         setState((prev) => ({
           ...prev,
+          activeJobId: null,
           isProcessing: false,
           currentStep: null,
         }));
         break;
     }
-  };
+  }, []);
+
+  const followJob = useCallback(
+    async (jobId: string) => {
+      const nextConnectionId = ++connectionRef.current;
+      abortRef.current?.abort();
+      abortRef.current = new AbortController();
+      saveActiveJobId(jobId);
+
+      setState({
+        activeJobId: jobId,
+        isProcessing: true,
+        steps: [],
+        currentStep: null,
+        result: null,
+        resultData: null,
+        error: null,
+      });
+
+      let terminalEventReceived = false;
+
+      try {
+        const response = await fetch(
+          `/api/jobs/${encodeURIComponent(jobId)}/stream`,
+          {
+            method: "GET",
+            signal: abortRef.current.signal,
+          }
+        );
+
+        if (response.status === 404) {
+          throw new Error("JOB_NOT_FOUND");
+        }
+
+        if (!response.ok || !response.body) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let eventType: string | null = null;
+        let dataBuffer: string[] = [];
+
+        const flushEvent = () => {
+          if (!eventType) return;
+          if (dataBuffer.length === 0) {
+            eventType = null;
+            return;
+          }
+          try {
+            const rawPayload = dataBuffer.join("\n");
+            const parsed: unknown = JSON.parse(rawPayload);
+            if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+              handleEvent(eventType, parsed as Record<string, unknown>);
+              if (eventType === "done" || eventType === "error") {
+                terminalEventReceived = true;
+              }
+            }
+          } catch {
+            // ignore invalid payloads
+          } finally {
+            eventType = null;
+            dataBuffer = [];
+          }
+        };
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() || "";
+
+          for (const line of lines) {
+            if (!line) {
+              flushEvent();
+              continue;
+            }
+
+            if (line.startsWith(":")) {
+              continue;
+            }
+
+            if (line.startsWith("event:")) {
+              eventType = line.slice(6).trim();
+              continue;
+            }
+
+            if (line.startsWith("data:")) {
+              dataBuffer.push(line.slice(5).trimStart());
+              continue;
+            }
+          }
+        }
+
+        flushEvent();
+
+        if (!terminalEventReceived && nextConnectionId === connectionRef.current) {
+          setState((prev) => ({
+            ...prev,
+            isProcessing: false,
+            currentStep: null,
+            error:
+              prev.error ||
+              "Connexion au job interrompue. Clique sur \"Suivre\" pour reprendre.",
+          }));
+        }
+      } catch (err) {
+        if ((err as Error).name === "AbortError") return;
+        if (nextConnectionId !== connectionRef.current) return;
+
+        if ((err as Error).message === "JOB_NOT_FOUND") {
+          saveActiveJobId(null);
+          setState((prev) => ({
+            ...prev,
+            activeJobId: null,
+            isProcessing: false,
+            currentStep: null,
+            error: "Ce job n'est plus disponible (backend redémarré ou job expiré).",
+          }));
+          return;
+        }
+
+        setState((prev) => ({
+          ...prev,
+          isProcessing: false,
+          currentStep: null,
+          error: (err as Error).message,
+        }));
+      }
+    },
+    [handleEvent]
+  );
+
+  const process = useCallback(
+    async (config: ProcessConfig) => {
+      abortRef.current?.abort();
+      saveActiveJobId(null);
+      setState({
+        activeJobId: null,
+        isProcessing: true,
+        steps: [],
+        currentStep: null,
+        result: null,
+        resultData: null,
+        error: null,
+      });
+
+      try {
+        const job = await createProcessJob(config);
+        await followJob(job.id);
+      } catch (err) {
+        saveActiveJobId(null);
+        setState((prev) => ({
+          ...prev,
+          activeJobId: null,
+          isProcessing: false,
+          currentStep: null,
+          error: (err as Error).message,
+        }));
+      }
+    },
+    [followJob]
+  );
 
   const cancel = useCallback(() => {
     abortRef.current?.abort();
@@ -250,5 +371,15 @@ export function useSSE() {
     }));
   }, []);
 
-  return { ...state, process, cancel };
+  useEffect(() => {
+    const persistedJobId = loadActiveJobId();
+    if (persistedJobId) {
+      void followJob(persistedJobId);
+    }
+    return () => {
+      abortRef.current?.abort();
+    };
+  }, [followJob]);
+
+  return { ...state, process, followJob, cancel };
 }

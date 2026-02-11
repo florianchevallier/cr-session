@@ -72,7 +72,6 @@ export async function formatterNode(
           : "") +
         `## Contraintes impératives\n` +
         `- Respecte l'ordre strict des SCENE_ID (chronologie de session).\n` +
-        `- Pour chaque scène, crée une section "Timeline détaillée" en reprenant les KEY_EVENTS dans le même ordre.\n` +
         `- Conserve le bloc NARRATIVE de façon fidèle et détaillée : ne le compresse pas, n'en retire pas les nuances.\n` +
         `- N'invente aucun événement, aucun dialogue, aucun PNJ.\n\n` +
         `Génère maintenant le compte-rendu Markdown final complet.`
