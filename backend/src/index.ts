@@ -969,6 +969,105 @@ app.post("/api/reports/:id/correct", async (req, res) => {
   }
 });
 
+// ── Scene editing ────────────────────────────────────────────────────────────
+
+app.get("/api/reports/:id/scenes", (req, res) => {
+  const report = getReport(req.params.id);
+  if (!report) {
+    res.status(404).json({ message: "Rapport introuvable." });
+    return;
+  }
+
+  const workflowState = report.workflowState as Record<string, unknown>;
+  const scenes = (workflowState?.scenes as SceneMeta[]) || [];
+  const sceneSummaries = (workflowState?.sceneSummaries as unknown[]) || [];
+
+  res.json({
+    scenes: scenes.map((scene, idx) => ({
+      ...scene,
+      summary: sceneSummaries[idx] || null,
+    })),
+  });
+});
+
+app.put("/api/reports/:id/scenes/:sceneId", async (req, res) => {
+  const reportId = req.params.id;
+  const sceneId = Number.parseInt(req.params.sceneId, 10);
+
+  if (!Number.isFinite(sceneId)) {
+    res.status(400).json({ message: "ID de scène invalide." });
+    return;
+  }
+
+  const report = getReport(reportId);
+  if (!report) {
+    res.status(404).json({ message: "Rapport introuvable." });
+    return;
+  }
+
+  const narrativeSummary = typeof req.body?.narrativeSummary === "string"
+    ? req.body.narrativeSummary.trim()
+    : "";
+
+  if (!narrativeSummary) {
+    res.status(400).json({ message: "Le contenu narratif est requis." });
+    return;
+  }
+
+  try {
+    const workflowState = report.workflowState as Record<string, unknown>;
+    const sceneSummaries = (workflowState?.sceneSummaries as Array<Record<string, unknown>>) || [];
+
+    // Find and update the scene summary
+    const sceneIndex = sceneSummaries.findIndex(
+      (s) => s.sceneId === sceneId
+    );
+
+    if (sceneIndex === -1) {
+      res.status(404).json({ message: "Scène introuvable." });
+      return;
+    }
+
+    // Update the narrative summary
+    sceneSummaries[sceneIndex] = {
+      ...sceneSummaries[sceneIndex],
+      narrativeSummary,
+    };
+
+    // Update workflow state
+    const updatedWorkflowState = {
+      ...workflowState,
+      sceneSummaries,
+    };
+
+    updateReportWorkflowState(reportId, updatedWorkflowState);
+
+    // Regenerate the report using the formatter
+    const { formatterNode } = await import("./agents/formatter.js");
+    const formatterResult = await formatterNode(updatedWorkflowState as any);
+    const newReport = formatterResult.finalReport as string;
+
+    updateReportMd(reportId, newReport);
+
+    log("Scene updated and report regenerated", { reportId, sceneId });
+
+    res.json({
+      reportId,
+      sceneId,
+      reportMd: newReport,
+    });
+  } catch (err) {
+    log("Scene update error", {
+      reportId,
+      sceneId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    res.status(500).json({
+      message: err instanceof Error ? err.message : "Erreur lors de la mise à jour de la scène.",
+    });
+  }
+});
+
 // ── Process jobs (in-memory queue + resumable SSE) ───────────────────────────
 
 app.post("/api/jobs", upload.single("transcript"), (req, res) => {

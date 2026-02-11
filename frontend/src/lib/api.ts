@@ -236,3 +236,71 @@ export async function correctReport(
   }
   return res.json();
 }
+
+// ── Scene editing ────────────────────────────────────────────────────────────
+
+export interface SceneMeta {
+  id: number;
+  title: string;
+  type: string;
+  startLine: number;
+  endLine: number;
+  location?: string;
+}
+
+export interface SceneSummary {
+  sceneId: number;
+  narrativeSummary: string;
+  keyEvents: string[];
+  diceRolls: Array<{
+    character: string;
+    skill: string;
+    result: string;
+    context: string;
+  }>;
+  npcsInvolved: string[];
+  technicalNotes?: string[];
+}
+
+export interface SceneWithSummary extends SceneMeta {
+  summary: SceneSummary | null;
+}
+
+export interface UpdateSceneResult {
+  reportId: string;
+  sceneId: number;
+  reportMd: string;
+}
+
+export async function fetchScenes(reportId: string): Promise<SceneWithSummary[]> {
+  const res = await fetch(`/api/reports/${encodeURIComponent(reportId)}/scenes`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const data = await res.json();
+  return data.scenes;
+}
+
+export async function updateScene(
+  reportId: string,
+  sceneId: number,
+  narrativeSummary: string
+): Promise<UpdateSceneResult> {
+  const res = await fetch(
+    `/api/reports/${encodeURIComponent(reportId)}/scenes/${sceneId}`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ narrativeSummary }),
+    }
+  );
+  if (!res.ok) {
+    let errorMessage = `HTTP ${res.status}`;
+    try {
+      const body = (await res.json()) as { message?: string };
+      if (body?.message) errorMessage = body.message;
+    } catch {
+      // no-op
+    }
+    throw new Error(errorMessage);
+  }
+  return res.json();
+}

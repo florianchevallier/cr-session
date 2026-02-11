@@ -8,8 +8,12 @@ import {
   Loader2,
   Send,
   Check,
+  ChevronDown,
+  ChevronUp,
 } from "lucide-react";
 import { useState, useCallback, useRef, useEffect } from "react";
+import SceneEditor from "./SceneEditor";
+import { fetchScenes, updateScene, type SceneWithSummary } from "../lib/api";
 
 interface ReportViewerProps {
   report: string;
@@ -19,6 +23,7 @@ interface ReportViewerProps {
     instruction: string
   ) => Promise<void>;
   isCorrecting?: boolean;
+  onReportUpdate?: (newReport: string) => void;
 }
 
 export default function ReportViewer({
@@ -26,6 +31,7 @@ export default function ReportViewer({
   reportId,
   onCorrection,
   isCorrecting = false,
+  onReportUpdate,
 }: ReportViewerProps) {
   const [copied, setCopied] = useState(false);
   const [selectedText, setSelectedText] = useState("");
@@ -35,13 +41,84 @@ export default function ReportViewer({
     top: number;
     left: number;
   } | null>(null);
-  const [showSuccess, setShowSuccess] = useState(false);
+  const [showToast, setShowToast] = useState(false);
+  const [toastType, setToastType] = useState<"loading" | "success">("loading");
   const prevIsCorrecting = useRef(false);
   const reportBeforeCorrection = useRef<string | null>(null);
   const reportContentRef = useRef<HTMLDivElement>(null);
   const correctionButtonRef = useRef<HTMLDivElement>(null);
   const correctionPanelRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Scene editing state
+  const [scenes, setScenes] = useState<SceneWithSummary[]>([]);
+  const [editingSceneId, setEditingSceneId] = useState<number | null>(null);
+  const [isSavingScene, setIsSavingScene] = useState(false);
+  const [scenesExpanded, setScenesExpanded] = useState(true);
+
+  // ── Load scenes when reportId is available ────────────────────────────────
+
+  useEffect(() => {
+    if (!reportId) {
+      setScenes([]);
+      return;
+    }
+
+    const loadScenes = async () => {
+      try {
+        const fetchedScenes = await fetchScenes(reportId);
+        setScenes(fetchedScenes);
+      } catch (error) {
+        console.error("Failed to load scenes:", error);
+      }
+    };
+
+    void loadScenes();
+  }, [reportId]);
+
+  // ── Scene editing handlers ─────────────────────────────────────────────────
+
+  const handleSceneSave = async (sceneId: number, newContent: string) => {
+    if (!reportId) return;
+
+    setIsSavingScene(true);
+    setEditingSceneId(sceneId);
+
+    try {
+      const result = await updateScene(reportId, sceneId, newContent);
+
+      // Update local scenes state
+      setScenes((prev) =>
+        prev.map((scene) =>
+          scene.id === sceneId && scene.summary
+            ? {
+                ...scene,
+                summary: { ...scene.summary, narrativeSummary: newContent },
+              }
+            : scene
+        )
+      );
+
+      // Notify parent component of report update
+      if (onReportUpdate) {
+        onReportUpdate(result.reportMd);
+      }
+
+      setToastType("success");
+      setShowToast(true);
+      setTimeout(() => setShowToast(false), 3000);
+    } catch (error) {
+      console.error("Failed to save scene:", error);
+      alert(
+        error instanceof Error
+          ? error.message
+          : "Erreur lors de la sauvegarde de la scène."
+      );
+    } finally {
+      setIsSavingScene(false);
+      setEditingSceneId(null);
+    }
+  };
 
   const handleDownload = () => {
     const blob = new Blob([report], { type: "text/markdown;charset=utf-8" });
@@ -194,42 +271,54 @@ export default function ReportViewer({
     };
   }, [showCorrectionPanel, selectedText, report]);
 
-  // ── Track correction state for success detection ─────────────────────────
+  // ── Track correction state for toast notifications ────────────────────────
 
   useEffect(() => {
     if (isCorrecting && !prevIsCorrecting.current) {
-      // Correction just started — snapshot the current report
+      // Correction just started
       reportBeforeCorrection.current = report;
+      setToastType("loading");
+      setShowToast(true);
     }
-    if (prevIsCorrecting.current && !isCorrecting && showCorrectionPanel) {
-      // Correction just finished — check if report actually changed
+    if (prevIsCorrecting.current && !isCorrecting) {
+      // Correction just finished
       const reportChanged = report !== reportBeforeCorrection.current;
       if (reportChanged) {
-        setShowSuccess(true);
+        setToastType("success");
         const timer = setTimeout(() => {
-          setShowSuccess(false);
-          setShowCorrectionPanel(false);
-          setCorrectionInstruction("");
-          setSelectedText("");
-        }, 1500);
-        // Store cleanup ref for unmount
+          setShowToast(false);
+        }, 3000);
         return () => clearTimeout(timer);
+      } else {
+        // If report didn't change, hide toast (error was shown elsewhere)
+        setShowToast(false);
       }
-      // If report didn't change, it was an error — keep panel open
     }
     prevIsCorrecting.current = isCorrecting;
-  }, [isCorrecting, report, showCorrectionPanel]);
+  }, [isCorrecting, report]);
 
-  // ── Auto-scroll correction panel into view ─────────────────────────────────
+  // ── Auto-focus textarea when panel opens ───────────────────────────────────
 
   useEffect(() => {
-    if (showCorrectionPanel && correctionPanelRef.current) {
-      correctionPanelRef.current.scrollIntoView({
-        behavior: "smooth",
-        block: "nearest",
-      });
+    if (showCorrectionPanel && textareaRef.current) {
+      textareaRef.current.focus();
     }
   }, [showCorrectionPanel]);
+
+  // ── Close modal with Escape key ────────────────────────────────────────────
+
+  useEffect(() => {
+    const handleEscape = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && showCorrectionPanel && !isCorrecting) {
+        handleCloseCorrectionPanel();
+      }
+    };
+
+    if (showCorrectionPanel) {
+      document.addEventListener("keydown", handleEscape);
+      return () => document.removeEventListener("keydown", handleEscape);
+    }
+  }, [showCorrectionPanel, isCorrecting]);
 
   // ── Handlers ───────────────────────────────────────────────────────────────
 
@@ -243,7 +332,6 @@ export default function ReportViewer({
     setShowCorrectionPanel(false);
     setCorrectionInstruction("");
     setSelectedText("");
-    setShowSuccess(false);
   };
 
   const handleSubmitCorrection = async () => {
@@ -253,6 +341,12 @@ export default function ReportViewer({
       !correctionInstruction.trim()
     )
       return;
+
+    // Close modal immediately and show toast
+    setShowCorrectionPanel(false);
+    setCorrectionInstruction("");
+    setSelectedText("");
+
     await onCorrection(selectedText, correctionInstruction.trim());
   };
 
@@ -270,11 +364,53 @@ export default function ReportViewer({
 
   return (
     <div className="space-y-4">
+      {/* Toast notification (top right) */}
+      {showToast && (
+        <div className="fixed top-4 right-4 z-50 animate-slide-in">
+          <div
+            className={`card px-4 py-3 shadow-lg border-2 flex items-center gap-3 min-w-[280px] ${
+              toastType === "success"
+                ? "border-green-400 bg-green-50/95"
+                : "border-amber-400 bg-amber-50/95"
+            }`}
+          >
+            {toastType === "loading" ? (
+              <>
+                <Loader2 className="h-5 w-5 text-amber-600 animate-spin flex-shrink-0" />
+                <span className="text-sm font-medium text-amber-900">
+                  Correction en cours...
+                </span>
+              </>
+            ) : (
+              <>
+                <div className="flex h-6 w-6 items-center justify-center rounded-full bg-green-100 flex-shrink-0">
+                  <Check className="h-4 w-4 text-green-600" />
+                </div>
+                <span className="text-sm font-medium text-green-800">
+                  {isSavingScene ? "Scène sauvegardée !" : "Correction appliquée !"}
+                </span>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Actions bar */}
       <div className="flex items-center justify-between">
-        <h2 className="text-lg font-bold text-parchment-900">
-          Compte-Rendu de Session
-        </h2>
+        <div className="flex items-center gap-3">
+          <h2 className="text-lg font-bold text-parchment-900">
+            Compte-Rendu de Session
+          </h2>
+          {reportId && scenes.length > 0 && (
+            <button
+              onClick={() => setScenesExpanded(!scenesExpanded)}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 px-3 py-1.5 text-xs font-semibold text-white shadow-md transition-all"
+            >
+              <Pencil className="h-3.5 w-3.5" />
+              Éditer les scènes ({scenes.filter((s) => s.type !== "meta" && s.type !== "pause").length})
+            </button>
+          )}
+        </div>
         <div className="flex gap-2">
           <button
             onClick={handleCopy}
@@ -297,56 +433,99 @@ export default function ReportViewer({
         </div>
       </div>
 
-      {/* Correction panel */}
-      {showCorrectionPanel && (
-        <div
-          ref={correctionPanelRef}
-          className={`card p-4 border-2 transition-colors duration-300 ${
-            showSuccess
-              ? "border-green-400 bg-green-50/80"
-              : "border-amber-300 bg-amber-50/80"
-          }`}
-        >
-          {showSuccess ? (
-            <div className="flex items-center gap-3 py-2">
-              <div className="flex h-8 w-8 items-center justify-center rounded-full bg-green-100">
-                <Check className="h-4 w-4 text-green-600" />
-              </div>
-              <p className="text-sm font-medium text-green-800">
-                Correction appliquée avec succès
-              </p>
+      {/* Scene editors (if reportId available) */}
+      {reportId && scenes.length > 0 && scenesExpanded && (
+        <div className="card border-2 border-amber-400 overflow-hidden bg-gradient-to-br from-amber-50 to-amber-100/50 animate-scale-in">
+          <div className="bg-amber-600 text-white px-4 py-3 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Pencil className="h-5 w-5" />
+              <h3 className="text-sm font-bold">
+                Édition des scènes narratives
+              </h3>
             </div>
-          ) : (
-            <>
-              <div className="flex items-start justify-between mb-3">
+            <button
+              onClick={() => setScenesExpanded(false)}
+              className="p-1 hover:bg-amber-700 rounded transition-colors"
+              aria-label="Fermer"
+            >
+              <X className="h-5 w-5" />
+            </button>
+          </div>
+
+          <div className="p-6 space-y-4">
+            <p className="text-sm text-amber-900 mb-4 bg-amber-100 p-3 rounded-lg border border-amber-200">
+              <strong>💡 Mode édition :</strong> Cliquez sur "Éditer" pour modifier le contenu narratif d'une scène. Les modifications régénèrent automatiquement le rapport complet.
+            </p>
+
+            {scenes
+              .filter((scene) => scene.type !== "meta" && scene.type !== "pause")
+              .map((scene) => (
+                <div key={scene.id} className="relative">
+                  {scene.summary ? (
+                    <SceneEditor
+                      sceneId={scene.id}
+                      title={scene.title}
+                      content={scene.summary.narrativeSummary}
+                      onSave={handleSceneSave}
+                      isSaving={isSavingScene && editingSceneId === scene.id}
+                    />
+                  ) : (
+                    <div className="card p-4 bg-parchment-100/50 border border-parchment-200">
+                      <p className="text-sm text-parchment-600">
+                        <strong>{scene.title}</strong> - Contenu non disponible
+                      </p>
+                    </div>
+                  )}
+                </div>
+              ))}
+          </div>
+        </div>
+      )}
+
+      {/* Correction modal (floating) */}
+      {showCorrectionPanel && (
+        <>
+          {/* Backdrop */}
+          <div
+            className="fixed inset-0 bg-black/20 backdrop-blur-sm z-40 animate-fade-in"
+            onClick={!isCorrecting ? handleCloseCorrectionPanel : undefined}
+          />
+
+          {/* Modal */}
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 pointer-events-none">
+            <div
+              ref={correctionPanelRef}
+              className="card w-full max-w-xl p-6 border-2 border-amber-300 bg-amber-50/95 backdrop-blur-md pointer-events-auto animate-scale-in shadow-2xl"
+            >
+              <div className="flex items-start justify-between mb-4">
                 <div className="flex items-center gap-2">
-                  <Pencil className="h-4 w-4 text-amber-700" />
-                  <h3 className="text-sm font-semibold text-amber-900">
+                  <Pencil className="h-5 w-5 text-amber-700" />
+                  <h3 className="text-base font-semibold text-amber-900">
                     Demande de correction
                   </h3>
                 </div>
                 <button
                   onClick={handleCloseCorrectionPanel}
-                  className="p-1 rounded-md hover:bg-amber-200/60 text-amber-700"
-                  disabled={isCorrecting}
+                  className="p-1.5 rounded-md hover:bg-amber-200/60 text-amber-700 transition-colors"
+                  aria-label="Fermer"
                 >
-                  <X className="h-4 w-4" />
+                  <X className="h-5 w-5" />
                 </button>
               </div>
 
-              <div className="mb-3">
-                <p className="text-xs text-amber-700 mb-1">
+              <div className="mb-4">
+                <p className="text-xs font-medium text-amber-700 mb-2">
                   Texte sélectionné :
                 </p>
-                <div className="bg-white/80 rounded-lg p-3 text-sm text-parchment-800 border border-amber-200 max-h-24 overflow-y-auto italic">
+                <div className="bg-white/90 rounded-lg p-3 text-sm text-parchment-800 border border-amber-200 max-h-32 overflow-y-auto italic shadow-sm">
                   « {selectedText} »
                 </div>
               </div>
 
-              <div className="mb-3">
+              <div className="mb-4">
                 <label
                   htmlFor="correction-instruction"
-                  className="block text-xs text-amber-700 mb-1"
+                  className="block text-xs font-medium text-amber-700 mb-2"
                 >
                   Quelle correction apporter ?
                 </label>
@@ -359,12 +538,10 @@ export default function ReportViewer({
                   }
                   onKeyDown={handleKeyDown}
                   placeholder="Ex: Ce n'est pas Yumi qui lance le sort mais Kael..."
-                  className="w-full rounded-lg border border-amber-200 bg-white/90 px-3 py-2 text-sm text-parchment-800 placeholder-parchment-400 focus:border-amber-400 focus:outline-none focus:ring-1 focus:ring-amber-300 resize-y"
-                  rows={3}
-                  disabled={isCorrecting}
-                  autoFocus
+                  className="w-full rounded-lg border border-amber-200 bg-white/90 px-3 py-2.5 text-sm text-parchment-800 placeholder-parchment-400 focus:border-amber-400 focus:outline-none focus:ring-2 focus:ring-amber-300/50 resize-y shadow-sm"
+                  rows={4}
                 />
-                <p className="mt-1 text-[11px] text-amber-500">
+                <p className="mt-2 text-[11px] text-amber-600">
                   {navigator.platform.includes("Mac")
                     ? "⌘"
                     : "Ctrl"}
@@ -372,27 +549,25 @@ export default function ReportViewer({
                 </p>
               </div>
 
-              <div className="flex justify-end">
+              <div className="flex justify-end gap-2">
+                <button
+                  onClick={handleCloseCorrectionPanel}
+                  className="btn-secondary text-sm"
+                >
+                  Annuler
+                </button>
                 <button
                   onClick={handleSubmitCorrection}
-                  disabled={
-                    !correctionInstruction.trim() || isCorrecting
-                  }
-                  className="btn-primary text-xs"
+                  disabled={!correctionInstruction.trim()}
+                  className="btn-primary text-sm"
                 >
-                  {isCorrecting ? (
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  ) : (
-                    <Send className="h-3.5 w-3.5" />
-                  )}
-                  {isCorrecting
-                    ? "Correction en cours..."
-                    : "Appliquer la correction"}
+                  <Send className="h-4 w-4" />
+                  Appliquer
                 </button>
               </div>
-            </>
-          )}
-        </div>
+            </div>
+          </div>
+        </>
       )}
 
       {/* Report content */}

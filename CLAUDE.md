@@ -79,3 +79,7 @@ React 19 + Vite + Tailwind with a custom "parchment" theme. 3-step wizard: confi
 - **Zod for structured outputs**: All LLM responses validated via Zod schemas compatible with Gemini's structured output mode.
 - **State reducers**: LangGraph state uses last-write-wins (`(_, b) => b`) except `sceneSummaries` (merge by ID) and `messages` (append).
 - **Prompts in config**: All system prompts centralized in `backend/src/config/prompts.ts`. Universe lore is separate markdown files.
+
+## Limitation
+- NEVER COMMIT on my behalf
+- NEVER CREATE documentation without my approval
