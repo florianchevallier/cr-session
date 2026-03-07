@@ -21,7 +21,7 @@ export const PlayerInfoSchema = z.object({
 
 export const SceneSchema = z.object({
   id: z.number().describe("ID séquentiel de la scène"),
-  title: z.string().describe("Titre évocateur de la scène"),
+  title: z.string().describe("Titre évocateur de la scène (casse de phrase, PAS de Title Case)"),
   startLine: z.number().describe("Numéro de ligne de début"),
   endLine: z.number().describe("Numéro de ligne de fin"),
   type: z

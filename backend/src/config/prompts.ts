@@ -33,7 +33,7 @@ Si des détails sont fournis (compétences, sphères, classe, limitations), ils 
 Analyse le transcript fourni et retourne une structure JSON avec :
 - speakerMap : association SPEAKER_XX → "Nom (Personnage)" ou "MJ"
 - entities : PJs, PNJs, lieux, objets
-- scenes : découpage en scènes avec type, lignes de début/fin, titre, lieu
+- scenes : découpage en scènes avec type, lignes de début/fin, titre (en casse de phrase, PAS de Title Case — ex: "La fuite dans les souterrains" et non "La Fuite Dans Les Souterrains"), lieu
 - characterProfiles : profils détaillés de chaque PJ
 
 Règles d'identité :

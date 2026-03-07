@@ -39,7 +39,7 @@ export function formatterNode(
     .map((s) => s.summary!);
 
   if (sceneSynopses.length > 0) {
-    parts.push("## Résumé de la Session");
+    parts.push("## Résumé de la session");
     parts.push("");
     parts.push(sceneSynopses.join(" "));
     parts.push("");
@@ -106,7 +106,7 @@ export function formatterNode(
   parts.push("");
 
   if (state.entities.npcs.length > 0) {
-    parts.push("### PNJs Rencontrés");
+    parts.push("### PNJs rencontrés");
     parts.push("");
     for (const npc of state.entities.npcs) {
       let line = `- **${npc.name}**`;
@@ -118,7 +118,7 @@ export function formatterNode(
   }
 
   if (state.entities.locations.length > 0) {
-    parts.push("### Lieux Visités");
+    parts.push("### Lieux visités");
     parts.push("");
     for (const loc of state.entities.locations) {
       parts.push(`- ${loc}`);
