@@ -6,16 +6,41 @@ import { fileURLToPath } from "url";
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 dotenv.config({ path: resolve(__dirname, "../../../.env") });
 
-/**
- * Creates a Gemini model instance. Uses Gemini Flash for analysis tasks,
- * Gemini Flash Lite for lighter tasks (summarization, formatting).
- */
+export type ModelTask =
+  | "analyst"
+  | "summarizer"
+  | "validator"
+  | "formatter"
+  | "correction";
+
+const DEFAULT_PRO = "gemini-2.5-flash-preview-05-20";
+const DEFAULT_FLASH = "gemini-2.0-flash-lite";
+
+const TASK_VARIANT: Record<ModelTask, "pro" | "flash"> = {
+  analyst: "pro",
+  summarizer: "pro",
+  validator: "flash",
+  formatter: "pro",
+  correction: "pro",
+};
+
+function resolveModelName(task: ModelTask): string {
+  const taskEnv = process.env[`GEMINI_MODEL_${task.toUpperCase()}`];
+  if (taskEnv?.trim()) return taskEnv.trim();
+
+  const variant = TASK_VARIANT[task];
+  const variantEnv = process.env[`GEMINI_MODEL_${variant.toUpperCase()}`];
+  if (variantEnv?.trim()) return variantEnv.trim();
+
+  return variant === "pro" ? DEFAULT_PRO : DEFAULT_FLASH;
+}
+
 export function createModel(
-  variant: "pro" | "flash" = "pro",
+  task: ModelTask,
   temperature = 0.3
 ): ChatGoogleGenerativeAI {
-  const model =
-    variant === "pro" ? "gemini-3-flash-preview" : "gemini-flash-lite-latest";
+  const model = resolveModelName(task);
+  console.log(`[llm] ${task} → ${model} (t=${temperature})`);
   return new ChatGoogleGenerativeAI({
     model,
     temperature,

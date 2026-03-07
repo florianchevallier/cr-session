@@ -10,7 +10,9 @@ import { createModel } from "../config/llm.js";
 import { extractSceneText } from "../tools/preprocessing.js";
 import {
   buildCharacterIdentities,
+  buildAbilityGuardrailsText,
   findPotentiallyMergedNames,
+  findGMAsCharacterIssues,
 } from "../tools/identity-guardrails.js";
 
 const log = (msg: string, data?: Record<string, unknown>) => {
@@ -20,6 +22,8 @@ const log = (msg: string, data?: Record<string, unknown>) => {
 
 const MAX_RETRIES = 2;
 const VALIDATION_CONCURRENCY = 5;
+const ISSUE_PREVIEW_LIMIT = 3;
+const ISSUE_SUGGESTION_PREVIEW_MAX_LENGTH = 90;
 
 const PerSceneIssueSchema = z.object({
   issue: z.string(),
@@ -30,6 +34,37 @@ const PerSceneIssueSchema = z.object({
 const PerSceneValidationSchema = z.object({
   isValid: z.boolean(),
   issues: z.array(PerSceneIssueSchema),
+});
+
+const GMCoherenceIssueSchema = z.object({
+  sceneId: z.number().describe("ID de la scène contenant le problème"),
+  passage: z.string().describe("Le passage exact du résumé où le MJ est traité comme un personnage"),
+  issue: z.string().describe("Description du problème"),
+  likelyRealCharacter: z
+    .string()
+    .describe("Le PJ ou PNJ qui devrait probablement être mentionné à la place du MJ"),
+});
+
+const GMCoherenceCheckSchema = z.object({
+  issues: z.array(GMCoherenceIssueSchema),
+});
+
+const CrossSceneIssueSchema = z.object({
+  sceneIdToFix: z
+    .number()
+    .describe(
+      "ID de la scène la plus probablement fautive (généralement la plus tardive)"
+    ),
+  contradictedBySceneId: z
+    .number()
+    .describe("ID de la scène qui établit le fait contredit"),
+  issue: z.string(),
+  severity: z.enum(["error", "warning"]),
+  suggestion: z.string().optional(),
+});
+
+const CrossSceneValidationSchema = z.object({
+  issues: z.array(CrossSceneIssueSchema),
 });
 
 function parseKeyEventLineRange(
@@ -50,6 +85,31 @@ function truncateForIssue(value: string, maxLength = 140): string {
   return `${compact.slice(0, maxLength - 1)}…`;
 }
 
+function summarizeIssueSeverities(
+  issues: Array<{ severity: "error" | "warning" | "info"; issue: string }>
+): {
+  errorsCount: number;
+  warningsCount: number;
+  infosCount: number;
+} {
+  return {
+    errorsCount: issues.filter((i) => i.severity === "error").length,
+    warningsCount: issues.filter((i) => i.severity === "warning").length,
+    infosCount: issues.filter((i) => i.severity === "info").length,
+  };
+}
+
+function buildIssuePreview(
+  issues: Array<{ severity: "error" | "warning" | "info"; issue: string; suggestion?: string }>
+): string[] {
+  return issues.slice(0, ISSUE_PREVIEW_LIMIT).map((issue) => {
+    const suggestion = issue.suggestion
+      ? ` -> ${truncateForIssue(issue.suggestion, ISSUE_SUGGESTION_PREVIEW_MAX_LENGTH)}`
+      : "";
+    return `[${issue.severity}] ${truncateForIssue(issue.issue)}${suggestion}`;
+  });
+}
+
 function chunkArray<T>(arr: T[], size: number): T[][] {
   const chunks: T[][] = [];
   for (let i = 0; i < arr.length; i += size) {
@@ -64,13 +124,15 @@ export async function validatorNode(
   state: WorkflowStateType
 ): Promise<Partial<WorkflowStateType>> {
   const scenesToValidate = state.sceneSummaries.length;
+  const phase = state.retryCount > 0 ? "correction" : "analyse";
   log("Début nœud: validator", {
+    phase,
     scenesCount: scenesToValidate,
     batchSize: VALIDATION_CONCURRENCY,
     retryCount: state.retryCount,
     pendingSceneIds: state.pendingSceneIds,
   });
-  const model = createModel("flash", 0.1);
+  const model = createModel("validator", 0.1);
   const writer = getWriter();
 
   const entitiesStr = JSON.stringify(state.entities, null, 2);
@@ -78,6 +140,11 @@ export async function validatorNode(
     .map(([speaker, identity]) => `${speaker} -> ${identity}`)
     .join("\n");
   const characterIdentities = buildCharacterIdentities(state);
+
+  const characterProfilesStr =
+    state.characterProfiles?.length > 0
+      ? buildAbilityGuardrailsText(state.characterProfiles)
+      : "Aucun profil de personnage disponible.";
 
   const systemPrompt = VALIDATOR_SYSTEM_PROMPT.replace(
     "{universeContext}",
@@ -87,7 +154,8 @@ export async function validatorNode(
     .replace(
       "{speakerMap}",
       speakerMapStr || "Aucune carte des speakers disponible."
-    );
+    )
+    .replace("{characterProfiles}", characterProfilesStr);
 
   const structuredModel = model.withStructuredOutput(PerSceneValidationSchema);
 
@@ -119,10 +187,41 @@ export async function validatorNode(
         )
       : [];
 
+  if (sceneIdsToValidate) {
+    log("Validator en mode correction", {
+      retryCount: state.retryCount,
+      sceneIdsToRevalidate: [...sceneIdsToValidate],
+      scenesSelectedForValidation: scenesWithSummaries.map((s) => s.scene.id),
+      carriedForwardIssuesCount: aggregatedIssues.length,
+    });
+  }
+
+  log("Validator sélection scènes", {
+    phase,
+    scenesSelectedCount: scenesWithSummaries.length,
+    sceneIds: scenesWithSummaries.map((entry) => entry.scene.id),
+  });
+
   const batches = chunkArray(scenesWithSummaries, VALIDATION_CONCURRENCY);
-  for (const batch of batches) {
+  for (let bi = 0; bi < batches.length; bi++) {
+    const batch = batches[bi];
+    log("Validator batch", {
+      phase,
+      retryCount: state.retryCount,
+      batchIndex: bi + 1,
+      totalBatches: batches.length,
+      sceneIds: batch.map((entry) => entry.scene.id),
+    });
     const batchResults = await Promise.all(
       batch.map(async ({ scene, summary }) => {
+        log("Validator scène: démarrage", {
+          phase,
+          retryCount: state.retryCount,
+          sceneId: scene.id,
+          title: scene.title,
+          startLine: scene.startLine,
+          endLine: scene.endLine,
+        });
         writer?.({
           event: "step:start",
           payload: {
@@ -190,6 +289,16 @@ export async function validatorNode(
           severity: "error" as const,
           suggestion: `Corriger l'attribution en separant clairement "${finding.leftCanonical}" et "${finding.rightCanonical}".`,
         }));
+
+        const gmIssues = findGMAsCharacterIssues(
+          summaryTextForChecks,
+          state.speakerMap
+        ).map((issue) => ({
+          issue,
+          severity: "error" as const,
+          suggestion:
+            "Identifier quel PJ est reellement concerne en analysant le contexte du transcript (qui vient de parler, qui est blesse, a qui le MJ s'adresse).",
+        }));
         const keyEventLineIssues = summary.keyEvents.flatMap((event) => {
           const range = parseKeyEventLineRange(event);
           if (!range) {
@@ -215,8 +324,24 @@ export async function validatorNode(
           }
           return [];
         });
-        const sceneIssues = [...perSceneValidation.issues, ...ruleBasedIssues];
+        const sceneIssues = [
+          ...perSceneValidation.issues,
+          ...ruleBasedIssues,
+          ...gmIssues,
+        ];
         sceneIssues.push(...keyEventLineIssues);
+        log("Validator scène: résultat", {
+          phase,
+          retryCount: state.retryCount,
+          sceneId: scene.id,
+          issuesCount: sceneIssues.length,
+          ...summarizeIssueSeverities(sceneIssues),
+          llmIssuesCount: perSceneValidation.issues.length,
+          mergedNamesIssuesCount: ruleBasedIssues.length,
+          gmAttributionIssuesCount: gmIssues.length,
+          keyEventLineIssuesCount: keyEventLineIssues.length,
+          issuePreview: buildIssuePreview(sceneIssues),
+        });
 
         writer?.({
           event: "step:complete",
@@ -248,12 +373,218 @@ export async function validatorNode(
     }
   }
 
+  // ── Global checks (cross-scene + GM coherence) — run in parallel ────────
+  const allNarrativeSummaries = state.sceneSummaries
+    .map((s) => {
+      const scene = state.scenes.find((sc) => sc.id === s.sceneId);
+      if (!scene || scene.type === "meta" || scene.type === "pause") return null;
+      return { scene, summary: s };
+    })
+    .filter(
+      (
+        entry
+      ): entry is {
+        scene: (typeof state.scenes)[number];
+        summary: (typeof state.sceneSummaries)[number];
+      } => entry !== null
+    );
+
+  if (allNarrativeSummaries.length >= 1) {
+    const sceneSummariesText = allNarrativeSummaries
+      .map(
+        ({ scene, summary }) =>
+          `## Scène ${scene.id}: ${scene.title}\n` +
+          `${summary.narrativeSummary}\n` +
+          `Key events: ${summary.keyEvents.join(" | ")}`
+      )
+      .join("\n\n---\n\n");
+
+    const globalChecks: Promise<void>[] = [];
+
+    // ── 1. Cross-scene coherence ──────────────────────────────────────────
+    if (allNarrativeSummaries.length >= 2) {
+      globalChecks.push(
+        (async () => {
+          writer?.({
+            event: "step:start",
+            payload: {
+              step: "validator_cross_scene",
+              label: "Validation de cohérence inter-scènes...",
+            },
+          });
+
+          try {
+            const crossSceneModel = model.withStructuredOutput(
+              CrossSceneValidationSchema
+            );
+
+            const crossResult = await crossSceneModel.invoke([
+              new SystemMessage(
+                `Tu es un relecteur expert en cohérence narrative pour les comptes-rendus de JDR.\n\n` +
+                  `## Ta mission\n` +
+                  `On te donne les résumés de TOUTES les scènes d'une session. Tu dois trouver les CONTRADICTIONS entre scènes.\n\n` +
+                  `## Ce que tu cherches\n` +
+                  `1. **Objets/possessions** : Si un objet est donné au personnage A dans la scène X, il ne peut pas appartenir au personnage B dans la scène Y (sauf transfert explicite)\n` +
+                  `2. **Compétences/attributions** : Si le personnage A utilise une compétence dans la scène X, un autre personnage ne devrait pas être crédité pour cette même compétence propre dans la scène Y\n` +
+                  `3. **Statut des personnages** : Blessures, soins, états — doivent être cohérents entre les scènes\n` +
+                  `4. **Lieux** : Les personnages doivent être au bon endroit (pas de téléportation non expliquée)\n` +
+                  `5. **Identités** : Un même personnage ne devrait pas changer de nom ou d'identité entre les scènes\n\n` +
+                  `## Règles\n` +
+                  `- Ne signale QUE les vraies contradictions entre scènes, pas les problèmes internes à une scène\n` +
+                  `- Pour chaque contradiction, identifie la scène fautive (généralement la plus tardive, celle qui contredit un fait établi)\n` +
+                  `- Sois concis et précis\n` +
+                  `- Si aucune contradiction, retourne un tableau vide\n`
+              ),
+              new HumanMessage(
+                `## Résumés de toutes les scènes\n\n${sceneSummariesText}\n\n` +
+                  `Trouve les contradictions inter-scènes.`
+              ),
+            ]);
+
+            if (crossResult.issues.length > 0) {
+              log("Cross-scene issues found", {
+                count: crossResult.issues.length,
+              });
+              for (const issue of crossResult.issues) {
+                aggregatedIssues.push({
+                  sceneId: issue.sceneIdToFix,
+                  issue: `[Inter-scènes] ${issue.issue} (contradiction avec scène ${issue.contradictedBySceneId})`,
+                  severity: issue.severity,
+                  suggestion: issue.suggestion,
+                });
+              }
+            }
+
+            writer?.({
+              event: "step:complete",
+              payload: {
+                step: "validator_cross_scene",
+                label: `Cohérence inter-scènes — ${crossResult.issues.length} contradiction(s)`,
+              },
+            });
+          } catch (crossErr) {
+            log("Cross-scene validation error (non-fatal)", {
+              error:
+                crossErr instanceof Error
+                  ? crossErr.message
+                  : String(crossErr),
+            });
+            writer?.({
+              event: "step:complete",
+              payload: {
+                step: "validator_cross_scene",
+                label: "Cohérence inter-scènes — erreur (ignorée)",
+              },
+            });
+          }
+        })()
+      );
+    }
+
+    // ── 2. GM coherence agent ─────────────────────────────────────────────
+    globalChecks.push(
+      (async () => {
+        writer?.({
+          event: "step:start",
+          payload: {
+            step: "validator_gm_coherence",
+            label: "Vérification rôle du MJ (agent dédié)...",
+          },
+        });
+
+        try {
+          const gmModel = model.withStructuredOutput(GMCoherenceCheckSchema);
+
+          const playerNames = (state.playerInfo ?? [])
+            .filter((p) => p.characterName?.trim())
+            .map((p) => `${p.characterName} (joueur: ${p.playerName})`)
+            .join(", ");
+
+          const gmResult = await gmModel.invoke([
+            new SystemMessage(
+              `Tu es un agent de vérification spécialisé. Ta SEULE mission : détecter si le MJ (Maître du Jeu) est traité comme un personnage dans les résumés de scènes.\n\n` +
+                `## Règle fondamentale\n` +
+                `Le MJ est le NARRATEUR du jeu de rôle. Il n'existe PAS dans le monde fictif. Le MJ :\n` +
+                `- N'a PAS de corps, PAS de points de vie, PAS de caractéristiques\n` +
+                `- Ne prend JAMAIS de dégâts, n'est JAMAIS blessé, n'est JAMAIS soigné\n` +
+                `- N'utilise JAMAIS de sorts, sphères, compétences, pouvoirs, focus, armes\n` +
+                `- Ne fait JAMAIS de jets de dés pour lui-même en tant que personnage\n` +
+                `- N'a PAS d'inventaire, ne reçoit PAS d'objets en tant que personnage\n` +
+                `- Ne combat PAS, n'esquive PAS, ne se déplace PAS comme un personnage\n\n` +
+                `## Ce que le MJ PEUT faire (légitime)\n` +
+                `- Décrire, narrer, raconter, expliquer, annoncer, demander\n` +
+                `- Incarner un PNJ (mais les actions sont attribuées au PNJ, pas au MJ)\n` +
+                `- Donner des informations, poser des questions, guider la narration\n` +
+                `- Faire des jets de dés POUR des PNJs (attribués au PNJ, pas au MJ)\n\n` +
+                `## Exemples de violations\n` +
+                `- "Le MJ effectue une analyse via la sphère de Prime" → VIOLATION (le MJ n'utilise pas de sphères)\n` +
+                `- "soigner le MJ" → VIOLATION (le MJ ne peut pas être soigné)\n` +
+                `- "le MJ accepte avec soulagement pour effacer sa contusion" → VIOLATION (le MJ n'a pas de contusions)\n` +
+                `- "le MJ lance les dés et obtient..." → OK SI c'est pour un PNJ\n` +
+                `- "le MJ décrit la caverne" → OK (narration)\n\n` +
+                `## PJs de la session\n` +
+                `${playerNames || "Non spécifié"}\n\n` +
+                `## Instructions\n` +
+                `- Analyse chaque résumé de scène\n` +
+                `- Signale TOUTE phrase où le MJ est sujet OU objet d'une action in-game\n` +
+                `- Pour chaque violation, essaie de deviner quel PJ ou PNJ est réellement concerné\n` +
+                `- Si aucune violation, retourne un tableau vide\n`
+            ),
+            new HumanMessage(
+              `## Résumés à vérifier\n\n${sceneSummariesText}`
+            ),
+          ]);
+
+          if (gmResult.issues.length > 0) {
+            log("GM coherence issues found", {
+              count: gmResult.issues.length,
+            });
+            for (const issue of gmResult.issues) {
+              aggregatedIssues.push({
+                sceneId: issue.sceneId,
+                issue: `[MJ-comme-personnage] ${issue.issue} — passage: "${issue.passage.slice(0, 100)}"`,
+                severity: "error",
+                suggestion: `Remplacer "le MJ" par le personnage réellement concerné (probablement ${issue.likelyRealCharacter}). Analyser le transcript pour confirmer.`,
+              });
+            }
+          }
+
+          writer?.({
+            event: "step:complete",
+            payload: {
+              step: "validator_gm_coherence",
+              label: `Rôle du MJ — ${gmResult.issues.length} violation(s)`,
+            },
+          });
+        } catch (gmErr) {
+          log("GM coherence check error (non-fatal)", {
+            error:
+              gmErr instanceof Error ? gmErr.message : String(gmErr),
+          });
+          writer?.({
+            event: "step:complete",
+            payload: {
+              step: "validator_gm_coherence",
+              label: "Rôle du MJ — erreur (ignorée)",
+            },
+          });
+        }
+      })()
+    );
+
+    await Promise.all(globalChecks);
+  }
+
   const hasErrors = aggregatedIssues.some((i) => i.severity === "error");
+  const nextRetryCount = state.retryCount + 1;
   log("Fin nœud: validator", {
     isValid: !hasErrors,
     issuesCount: aggregatedIssues.length,
     errorsCount: aggregatedIssues.filter((i) => i.severity === "error").length,
-    retryCount: state.retryCount + 1,
+    warningsCount: aggregatedIssues.filter((i) => i.severity === "warning")
+      .length,
+    infosCount: aggregatedIssues.filter((i) => i.severity === "info").length,
+    retryCount: nextRetryCount,
   });
   const pendingSceneIds = hasErrors
     ? [
@@ -264,14 +595,24 @@ export async function validatorNode(
         ),
       ]
     : [];
+  const canRetry = pendingSceneIds.length > 0 && nextRetryCount < MAX_RETRIES;
+  log("Décision corrective: validator", {
+    phase,
+    retryCount: nextRetryCount,
+    hasErrors,
+    pendingScenesCount: pendingSceneIds.length,
+    pendingSceneIds,
+    canRetry,
+    nextNode: canRetry ? "summarizer" : "formatter",
+  });
 
   return {
     validationReport: {
       isValid: !hasErrors,
       issues: aggregatedIssues,
     },
-    retryCount: state.retryCount + 1,
-    ...(pendingSceneIds.length > 0 && state.retryCount + 1 < MAX_RETRIES
+    retryCount: nextRetryCount,
+    ...(canRetry
       ? {
           pendingSceneIds,
           currentSceneIndex: 0,

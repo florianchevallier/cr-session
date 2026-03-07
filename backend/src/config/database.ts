@@ -75,6 +75,15 @@ function runMigrations(): void {
         );
       `,
     },
+    {
+      name: "003_report_context",
+      sql: `
+        ALTER TABLE reports ADD COLUMN raw_transcript TEXT;
+        ALTER TABLE reports ADD COLUMN preprocessed_transcript TEXT;
+        ALTER TABLE reports ADD COLUMN universe_context TEXT;
+        ALTER TABLE reports ADD COLUMN session_history TEXT;
+      `,
+    },
   ];
 
   const insertMigration = db.prepare(
@@ -164,6 +173,10 @@ export interface ReportRow {
   transcriptName: string;
   players: Array<{ playerName: string; characterName: string; speakerHint?: string }>;
   workflowState: Record<string, unknown> | null;
+  rawTranscript: string | null;
+  preprocessedTranscript: string | null;
+  universeContext: string | null;
+  sessionHistory: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -186,10 +199,14 @@ export function insertReport(report: {
   transcriptName: string;
   players: Array<{ playerName: string; characterName: string; speakerHint?: string }>;
   workflowState?: Record<string, unknown> | null;
+  rawTranscript?: string | null;
+  preprocessedTranscript?: string | null;
+  universeContext?: string | null;
+  sessionHistory?: string | null;
 }): void {
   db.prepare(
-    `INSERT INTO reports (id, job_id, report_md, universe_name, transcript_name, players_json, workflow_state_json, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`
+    `INSERT INTO reports (id, job_id, report_md, universe_name, transcript_name, players_json, workflow_state_json, raw_transcript, preprocessed_transcript, universe_context, session_history, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`
   ).run(
     report.id,
     report.jobId ?? null,
@@ -197,7 +214,11 @@ export function insertReport(report: {
     report.universeName,
     report.transcriptName,
     JSON.stringify(report.players),
-    report.workflowState ? JSON.stringify(report.workflowState) : null
+    report.workflowState ? JSON.stringify(report.workflowState) : null,
+    report.rawTranscript ?? null,
+    report.preprocessedTranscript ?? null,
+    report.universeContext ?? null,
+    report.sessionHistory ?? null
   );
 }
 
@@ -226,6 +247,10 @@ export function getReport(reportId: string): ReportRow | null {
         transcript_name: string;
         players_json: string;
         workflow_state_json: string | null;
+        raw_transcript: string | null;
+        preprocessed_transcript: string | null;
+        universe_context: string | null;
+        session_history: string | null;
         created_at: string;
         updated_at: string;
       }
@@ -257,6 +282,10 @@ export function getReport(reportId: string): ReportRow | null {
     transcriptName: row.transcript_name,
     players,
     workflowState,
+    rawTranscript: row.raw_transcript,
+    preprocessedTranscript: row.preprocessed_transcript,
+    universeContext: row.universe_context,
+    sessionHistory: row.session_history,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };

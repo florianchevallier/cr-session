@@ -113,30 +113,8 @@
 
 /* CSS Highlight API: highlight selected text while correction panel is open */
 ::highlight(correction-target) {
-  background-color: rgba(251, 191, 36, 0.3);
+  background-color: rgba(251, 191, 36, 0.35);
   color: inherit;
-}
-
-/* Report dimming during correction */
-.correction-in-progress {
-  pointer-events: none;
-  user-select: none;
-}
-
-.correction-overlay {
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  background: rgba(255, 255, 255, 0.55);
-  backdrop-filter: blur(1px);
-  animation: correction-pulse 2s ease-in-out infinite;
-  pointer-events: none;
-  z-index: 10;
-}
-
-@keyframes correction-pulse {
-  0%, 100% { opacity: 0.5; }
-  50% { opacity: 0.8; }
 }
 
 /* Floating correction button with arrow pointer */
@@ -210,51 +188,29 @@
   animation: slide-in 300ms ease-out;
 }
 
-/* ── Scene Editor styles ────────────────────────────────────────────────── */
+/* ── Scene heading edit button ──────────────────────────────────────────── */
 
-.scene-editor-container {
-  transition: all 0.2s ease-in-out;
+.prose-report h2.group\/heading {
+  @apply flex items-center justify-between gap-3;
 }
 
-.scene-editor-container:not(:has(.animate-scale-in)):hover {
-  transform: translateY(-2px);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
-}
+/* ── Scene scroll highlight flash ──────────────────────────────────────── */
 
-/* Smooth transitions for editable content */
-.scene-editor-container .prose-report {
-  transition: opacity 0.15s ease-in-out;
-}
-
-.scene-editor-container:has(.animate-scale-in) .prose-report {
-  opacity: 0.5;
-  pointer-events: none;
-}
-
-/* Editor textarea auto-resize smooth transition */
-.scene-editor-container textarea {
-  transition: height 0.1s ease-out;
-}
-
-/* Hover effect for edit button */
-.scene-editor-container button[aria-label^="Éditer"] {
-  transition: all 0.2s ease-in-out;
-}
-
-.scene-editor-container:hover button[aria-label^="Éditer"] {
-  transform: scale(1.05);
-}
-
-/* Success indicator pulse */
-@keyframes success-pulse {
-  0%, 100% {
-    transform: scale(1);
+@keyframes heading-flash {
+  0% {
+    background-color: transparent;
   }
-  50% {
-    transform: scale(1.05);
+  15% {
+    background-color: rgba(217, 119, 6, 0.15);
+  }
+  100% {
+    background-color: transparent;
   }
 }
 
-.scene-editor-container [aria-label="Sauvegardé"] {
-  animation: success-pulse 0.4s ease-in-out;
+.highlight-flash {
+  animation: heading-flash 2s ease-out;
+  border-radius: 4px;
+  padding-left: 8px;
+  margin-left: -8px;
 }

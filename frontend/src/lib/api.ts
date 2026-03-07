@@ -8,6 +8,7 @@ export interface PlayerInfo {
   playerName: string;
   characterName: string;
   speakerHint?: string;
+  characterDetails?: string;
 }
 
 export interface ProcessConfig {
@@ -270,6 +271,7 @@ export interface UpdateSceneResult {
   reportId: string;
   sceneId: number;
   reportMd: string;
+  updatedSummary?: SceneSummary;
 }
 
 export async function fetchScenes(reportId: string): Promise<SceneWithSummary[]> {
@@ -277,6 +279,64 @@ export async function fetchScenes(reportId: string): Promise<SceneWithSummary[]>
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const data = await res.json();
   return data.scenes;
+}
+
+export interface RebuildReportResult {
+  reportId: string;
+  reportMd: string;
+}
+
+export async function rebuildReport(
+  reportId: string
+): Promise<RebuildReportResult> {
+  const res = await fetch(
+    `/api/reports/${encodeURIComponent(reportId)}/rebuild`,
+    { method: "POST" }
+  );
+  if (!res.ok) {
+    let errorMessage = `HTTP ${res.status}`;
+    try {
+      const body = (await res.json()) as { message?: string };
+      if (body?.message) errorMessage = body.message;
+    } catch {
+      // no-op
+    }
+    throw new Error(errorMessage);
+  }
+  return res.json();
+}
+
+export interface RegenerateSceneResult {
+  reportId: string;
+  sceneId: number;
+  reportMd: string;
+  regeneratedSummary: SceneSummary;
+}
+
+export async function regenerateScene(
+  reportId: string,
+  sceneId: number,
+  instruction?: string
+): Promise<RegenerateSceneResult> {
+  const body = instruction?.trim() ? JSON.stringify({ instruction: instruction.trim() }) : undefined;
+  const res = await fetch(
+    `/api/reports/${encodeURIComponent(reportId)}/scenes/${sceneId}/regenerate`,
+    {
+      method: "POST",
+      ...(body ? { headers: { "Content-Type": "application/json" }, body } : {}),
+    }
+  );
+  if (!res.ok) {
+    let errorMessage = `HTTP ${res.status}`;
+    try {
+      const body = (await res.json()) as { message?: string };
+      if (body?.message) errorMessage = body.message;
+    } catch {
+      // no-op
+    }
+    throw new Error(errorMessage);
+  }
+  return res.json();
 }
 
 export async function updateScene(

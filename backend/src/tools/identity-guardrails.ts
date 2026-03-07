@@ -1,9 +1,12 @@
-import { WorkflowStateType } from "../graph/state.js";
+import { z } from "zod";
+import { WorkflowStateType, CharacterProfileSchema } from "../graph/state.js";
 
 export type CharacterIdentity = {
   canonical: string;
   aliases: string[];
 };
+
+type CharacterProfile = z.infer<typeof CharacterProfileSchema>;
 
 type Match = {
   mergedName: string;
@@ -160,9 +163,10 @@ function buildTokenCollisions(identities: CharacterIdentity[]): string[] {
 }
 
 export function buildIdentityGuardrailsText(
-  identities: CharacterIdentity[]
+  identities: CharacterIdentity[],
+  profiles?: CharacterProfile[]
 ): string {
-  if (identities.length === 0) {
+  if (identities.length === 0 && (!profiles || profiles.length === 0)) {
     return (
       "### Garde-fous d'attribution\n" +
       "- Aucun roster fiable detecte. Reste tres prudent sur l'attribution des actions."
@@ -182,14 +186,221 @@ export function buildIdentityGuardrailsText(
       ? `\n- Noms potentiellement ambigus (tokens partages) :\n${collisionLines.join("\n")}`
       : "";
 
-  return (
+  let text =
     "### Garde-fous d'attribution\n" +
     "- Personnages distincts a ne jamais fusionner :\n" +
     `${rosterLines.join("\n")}` +
     `${collisionSection}\n` +
     "- Interdiction absolue : ne jamais creer de nom hybride (ex: combinaison de 2 personnages).\n" +
-    "- Si l'agent d'une action est ambigu, explicite l'incertitude au lieu d'inventer."
+    "- Si l'agent d'une action est ambigu, explicite l'incertitude au lieu d'inventer.";
+
+  if (profiles && profiles.length > 0) {
+    text += buildAbilityGuardrailsText(profiles);
+  }
+
+  return text;
+}
+
+export function buildAbilityGuardrailsText(
+  profiles: CharacterProfile[]
+): string {
+  if (profiles.length === 0) return "";
+
+  const lines: string[] = [
+    "",
+    "",
+    "### Compétences par personnage (RÉFÉRENCE OBLIGATOIRE POUR VÉRIFIER LES ATTRIBUTIONS)",
+    "",
+  ];
+
+  for (const p of profiles) {
+    lines.push(`**${p.characterName}** (joué par ${p.playerName}) :`);
+    if (p.knownAbilities.length > 0) {
+      lines.push(`  ✅ Maîtrise : ${p.knownAbilities.join(", ")}`);
+    }
+    if (p.prohibitedAbilities.length > 0) {
+      lines.push(`  ❌ NE maîtrise PAS : ${p.prohibitedAbilities.join(", ")}`);
+    }
+    lines.push(`  Rôle : ${p.roleInGroup}`);
+    if (p.speechPatterns.length > 0) {
+      lines.push(`  Patterns de parole : ${p.speechPatterns.join(" | ")}`);
+    }
+    lines.push("");
+  }
+
+  lines.push(
+    "⚠️ Si une action utilise une compétence ❌ pour un personnage, c'est probablement une ERREUR de diarization.",
+    "   → Chercher dans le contexte quel personnage possède réellement cette compétence.",
+    ""
   );
+
+  return lines.join("\n");
+}
+
+const GAME_MECHANIC_TERMS = [
+  "sphère",
+  "sphere",
+  "sort",
+  "magie",
+  "magyque",
+  "magique",
+  "incantation",
+  "quintessence",
+  "arete",
+  "arété",
+  "paradoxe",
+  "vulgarit",
+  "dégâts",
+  "dommages",
+  "contusion",
+  "blessure",
+  "points de vie",
+  "pv",
+  "pdv",
+  "soins",
+  "guérison",
+  "inventaire",
+  "focus",
+  "Forces",
+  "Esprit",
+  "Vie",
+  "Entropie",
+  "Correspondance",
+  "Temps",
+  "Prime",
+  "Matière",
+  "Mental",
+  "canalise",
+  "invoque",
+  "conjure",
+  "incante",
+  "vortex",
+];
+
+function splitSentences(text: string): string[] {
+  return text.split(/(?<=[.!?…])\s+|(?:\n)+/).filter((s) => s.trim().length > 5);
+}
+
+function collectGMNames(speakerMap: Record<string, string>): Set<string> {
+  const gmNames = new Set<string>();
+  for (const identity of Object.values(speakerMap)) {
+    const normalized = identity.trim().toLowerCase();
+    if (
+      normalized.includes("(mj)") ||
+      normalized === "mj" ||
+      normalized.includes("maître du jeu") ||
+      normalized.includes("maitre du jeu") ||
+      normalized.includes("game master") ||
+      normalized.includes("(gm)")
+    ) {
+      const name = identity.replace(/\s*\(.*?\)\s*/g, "").trim();
+      if (name) gmNames.add(name);
+      gmNames.add("MJ");
+      gmNames.add("le MJ");
+    }
+  }
+  return gmNames;
+}
+
+const GM_NARRATIVE_VERBS =
+  /\b(?:décri[ts]?|expliqu|annonc|di[ts]|raconter?|demand|propos|présent|montr|indiqu|rappel|prévi[en]|averti|confirm|précis|introdui|narre|révèl|signal|intervien)/i;
+
+export function findGMAsCharacterIssues(
+  text: string,
+  speakerMap: Record<string, string>
+): string[] {
+  const gmNames = collectGMNames(speakerMap);
+  if (gmNames.size === 0) return [];
+
+  const issues: string[] = [];
+  const sentences = splitSentences(text);
+
+  const gmActionVerbs =
+    /\b(?:effectu|utilis|lanc[eé]|canalis|activ|invoqu|conjur|jett?e|déploie?|déclench|jet(?:te)?|soign|guéri|combat|attaqu|par[eé]|esquiv|encaiss|reçoi[ts]|subit?|prend|récupèr|regagn|absorb|manifest|analyse|incante|frappe|bloqu|esquiv)\w*/i;
+
+  const gmAsObject =
+    /\b(?:soigner|guérir|blesser|frapper|attaquer|toucher|heal|protéger|sauver|aider)\s+(?:totalement\s+|complètement\s+|entièrement\s+)?(?:le\s+|l')?/i;
+
+  const gmPassivePatterns = [
+    /est\s+(?:blessé|soigné|guéri|touché|frappé|protégé|sauvé|attaqué)/i,
+    /(?:sa|ses|son)\s+(?:dernière|blessure|contusion|point|santé|vie|vigueur)/i,
+  ];
+
+  const mechanicTermsRe = new RegExp(
+    `\\b(?:${GAME_MECHANIC_TERMS.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})`,
+    "i"
+  );
+
+  for (const sentence of sentences) {
+    const sentenceLower = sentence.toLowerCase();
+
+    for (const gmName of gmNames) {
+      if (gmName.length < 2) continue;
+      const gmLower = gmName.toLowerCase();
+      if (!sentenceLower.includes(gmLower)) continue;
+
+      const escaped = gmName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+      // 1. MJ as subject performing a game action (not narrative)
+      const subjectPattern = new RegExp(
+        `(?:le\\s+|l')?${escaped}\\s+`,
+        "i"
+      );
+      const subjectMatch = sentence.match(subjectPattern);
+      if (subjectMatch) {
+        const afterSubject = sentence.slice(
+          (subjectMatch.index ?? 0) + subjectMatch[0].length
+        );
+
+        if (gmActionVerbs.test(afterSubject) && !GM_NARRATIVE_VERBS.test(afterSubject)) {
+          issues.push(
+            `Le MJ agit comme un personnage: "${sentence.slice(0, 120).trim()}…". Le MJ est le narrateur, pas un PJ.`
+          );
+          continue;
+        }
+      }
+
+      // 2. MJ + game mechanic term in the same sentence (proximity)
+      if (mechanicTermsRe.test(sentence) && !GM_NARRATIVE_VERBS.test(sentence)) {
+        const gmIndex = sentenceLower.indexOf(gmLower);
+        const mechMatch = sentence.match(mechanicTermsRe);
+        if (mechMatch && Math.abs((mechMatch.index ?? 0) - gmIndex) < 120) {
+          issues.push(
+            `Le MJ est associé à un terme de mécanique de jeu: "${sentence.slice(0, 120).trim()}…". Le MJ ne peut pas utiliser de mécaniques in-game.`
+          );
+          continue;
+        }
+      }
+
+      // 3. MJ as object of a game action
+      const objectPattern = new RegExp(
+        `${gmAsObject.source}${escaped}`,
+        "i"
+      );
+      if (objectPattern.test(sentence)) {
+        issues.push(
+          `Le MJ est objet d'une action in-game: "${sentence.slice(0, 120).trim()}…". Le MJ ne peut pas être soigné/blessé/etc.`
+        );
+        continue;
+      }
+
+      // 4. MJ with passive game states
+      for (const passivePattern of gmPassivePatterns) {
+        if (passivePattern.test(sentence)) {
+          const gmIdx = sentenceLower.indexOf(gmLower);
+          const passiveMatch = sentence.match(passivePattern);
+          if (passiveMatch && Math.abs((passiveMatch.index ?? 0) - gmIdx) < 80) {
+            issues.push(
+              `Le MJ a un état de jeu: "${sentence.slice(0, 120).trim()}…". Le MJ n'a pas d'état in-game.`
+            );
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  return [...new Set(issues)];
 }
 
 export function findPotentiallyMergedNames(

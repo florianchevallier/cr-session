@@ -7,6 +7,7 @@ import { fileURLToPath } from "url";
 import { randomUUID } from "crypto";
 import dotenv from "dotenv";
 import { buildWorkflow } from "./graph/workflow.js";
+import { extractSceneText } from "./tools/preprocessing.js";
 import {
   getEditorDraft,
   upsertEditorDraft,
@@ -22,6 +23,7 @@ import {
 } from "./config/database.js";
 import { createModel } from "./config/llm.js";
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
+import { z } from "zod";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 dotenv.config({ path: resolve(__dirname, "../../.env") });
@@ -53,6 +55,7 @@ const customUniversesDir = resolve(__dirname, "..", "data", "universes");
 const editorDraftsDir = resolve(__dirname, "..", "data", "editor-drafts");
 const frontendDistDir = resolve(__dirname, "../../frontend/dist");
 const isProduction = process.env.NODE_ENV === "production";
+const frontendDevUrl = process.env.FRONTEND_DEV_URL || "http://localhost:5173";
 
 if (isProduction && existsSync(frontendDistDir)) {
   app.use(express.static(frontendDistDir));
@@ -75,6 +78,7 @@ type PlayerDraft = {
   playerName: string;
   characterName: string;
   speakerHint?: string;
+  characterDetails?: string;
 };
 
 type EditorDraft = {
@@ -93,6 +97,10 @@ function parsePlayerDraft(value: unknown): PlayerDraft | null {
     playerName: playerName.trim(),
     characterName: characterName.trim(),
     speakerHint: typeof o.speakerHint === "string" ? o.speakerHint : undefined,
+    characterDetails:
+      typeof o.characterDetails === "string" && o.characterDetails.trim()
+        ? o.characterDetails.trim()
+        : undefined,
   };
 }
 
@@ -302,6 +310,153 @@ const log = (msg: string, data?: Record<string, unknown>) => {
   const payload = data ? ` ${JSON.stringify(data)}` : "";
   console.log(`[cr] ${msg}${payload}`);
 };
+
+type ValidationIssueLog = {
+  sceneId?: number;
+  issue: string;
+  severity: "error" | "warning" | "info";
+  suggestion?: string;
+};
+const CORRECTION_LOG_PREVIEW_MAX_LENGTH = 280;
+
+function toSingleLinePreview(
+  value: string,
+  maxLength = CORRECTION_LOG_PREVIEW_MAX_LENGTH
+): string {
+  const compact = value.replace(/\s+/g, " ").trim();
+  if (compact.length <= maxLength) return compact;
+  return `${compact.slice(0, maxLength - 3)}...`;
+}
+
+function parseValidationIssues(value: unknown): ValidationIssueLog[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (!item || typeof item !== "object") return [];
+    const issue = item as Record<string, unknown>;
+    const severity = issue.severity;
+    const issueText = typeof issue.issue === "string" ? issue.issue : "";
+    if (
+      (severity !== "error" && severity !== "warning" && severity !== "info") ||
+      !issueText
+    ) {
+      return [];
+    }
+    return [
+      {
+        sceneId: typeof issue.sceneId === "number" ? issue.sceneId : undefined,
+        issue: issueText,
+        severity,
+        suggestion:
+          typeof issue.suggestion === "string" ? issue.suggestion : undefined,
+      },
+    ];
+  });
+}
+
+function summarizeValidationIssues(issues: ValidationIssueLog[]): {
+  issuesCount: number;
+  errorsCount: number;
+  warningsCount: number;
+  infosCount: number;
+  errorSceneIds: number[];
+  sceneBreakdown: Array<{ sceneId: number; issuesCount: number; errorsCount: number }>;
+} {
+  const byScene = new Map<number, ValidationIssueLog[]>();
+  for (const issue of issues) {
+    if (typeof issue.sceneId !== "number") continue;
+    const sceneIssues = byScene.get(issue.sceneId) ?? [];
+    sceneIssues.push(issue);
+    byScene.set(issue.sceneId, sceneIssues);
+  }
+
+  const errorSceneIds = [...new Set(
+    issues
+      .filter((issue) => issue.severity === "error" && issue.sceneId != null)
+      .map((issue) => issue.sceneId!)
+  )];
+
+  return {
+    issuesCount: issues.length,
+    errorsCount: issues.filter((issue) => issue.severity === "error").length,
+    warningsCount: issues.filter((issue) => issue.severity === "warning").length,
+    infosCount: issues.filter((issue) => issue.severity === "info").length,
+    errorSceneIds,
+    sceneBreakdown: [...byScene.entries()]
+      .map(([sceneId, sceneIssues]) => ({
+        sceneId,
+        issuesCount: sceneIssues.length,
+        errorsCount: sceneIssues.filter((i) => i.severity === "error").length,
+      }))
+      .sort((a, b) => a.sceneId - b.sceneId),
+  };
+}
+
+function extractSectionContaining(
+  report: string,
+  selectedText: string
+): {
+  text: string;
+  start: number;
+  end: number;
+  selectionFound: boolean;
+  selectionIndex: number;
+} {
+  const selectionIndex = report.indexOf(selectedText);
+  if (selectionIndex === -1) {
+    return {
+      text: report,
+      start: 0,
+      end: report.length,
+      selectionFound: false,
+      selectionIndex: -1,
+    };
+  }
+
+  const headingPattern = /^---$|^## /m;
+  const lines = report.split("\n");
+  let charOffset = 0;
+  const lineOffsets: number[] = [];
+  for (const line of lines) {
+    lineOffsets.push(charOffset);
+    charOffset += line.length + 1;
+  }
+
+  let sectionStartLine = 0;
+  let sectionEndLine = lines.length;
+
+  for (let i = 0; i < lines.length; i++) {
+    const offset = lineOffsets[i];
+    if (offset > selectionIndex) break;
+    if (headingPattern.test(lines[i])) {
+      sectionStartLine = i;
+    }
+  }
+
+  for (let i = sectionStartLine + 1; i < lines.length; i++) {
+    if (headingPattern.test(lines[i])) {
+      const offset = lineOffsets[i];
+      if (offset > selectionIndex + selectedText.length) {
+        sectionEndLine = i;
+        break;
+      }
+      sectionStartLine = i;
+    }
+  }
+
+  const start = lineOffsets[sectionStartLine];
+  const end =
+    sectionEndLine < lines.length
+      ? lineOffsets[sectionEndLine]
+      : report.length;
+
+  return {
+    text: report.slice(start, end),
+    start,
+    end,
+    selectionFound: true,
+    selectionIndex,
+  };
+}
 
 type ProcessJobStatus = "pending" | "running" | "completed" | "failed";
 
@@ -591,6 +746,7 @@ async function runProcessJob(job: ProcessJob): Promise<void> {
     });
 
     let narrativeScenesCache: SceneMeta[] = [];
+    const accumulatedState: Record<string, unknown> = {};
 
     const sendSceneCollection = (
       group: "summarizer" | "validator",
@@ -619,9 +775,27 @@ async function runProcessJob(job: ProcessJob): Promise<void> {
       }
     };
 
+    const mergeIntoAccumulatedState = (output: Record<string, unknown>) => {
+      if (output.sceneSummaries && Array.isArray(output.sceneSummaries)) {
+        const existing = (accumulatedState.sceneSummaries as Array<Record<string, unknown>>) ?? [];
+        const incoming = output.sceneSummaries as Array<Record<string, unknown>>;
+        const byId = new Map<number, Record<string, unknown>>();
+        for (const s of existing) byId.set(s.sceneId as number, s);
+        for (const s of incoming) byId.set(s.sceneId as number, s);
+        const { sceneSummaries: _ss, ...rest } = output;
+        Object.assign(accumulatedState, rest);
+        accumulatedState.sceneSummaries = Array.from(byId.values()).sort(
+          (a, b) => (a.sceneId as number) - (b.sceneId as number)
+        );
+      } else {
+        Object.assign(accumulatedState, output);
+      }
+    };
+
     const handleUpdateChunk = (update: Record<string, unknown>) => {
       for (const [nodeName, nodeOutput] of Object.entries(update)) {
         const output = nodeOutput as Record<string, unknown>;
+        mergeIntoAccumulatedState(output);
         switch (nodeName) {
           case "preprocessor":
             log("Étape terminée: preprocessor", { jobId: job.id });
@@ -689,12 +863,15 @@ async function runProcessJob(job: ProcessJob): Promise<void> {
               isValid: boolean;
               issues: unknown[];
             };
-            const retryCount = output.retryCount as number;
+            const retryCount =
+              typeof output.retryCount === "number" ? output.retryCount : 0;
+            const parsedIssues = parseValidationIssues(report?.issues);
+            const validationSummary = summarizeValidationIssues(parsedIssues);
             log("Étape terminée: validator", {
               jobId: job.id,
               isValid: report?.isValid,
-              issuesCount: report?.issues?.length ?? 0,
               retryCount,
+              ...validationSummary,
             });
 
             publishProcessJobEvent(job, "step:complete", {
@@ -705,18 +882,7 @@ async function runProcessJob(job: ProcessJob): Promise<void> {
               data: { validationReport: report, retryCount },
             });
 
-            const errorSceneIds = [
-              ...new Set(
-                (report?.issues || [])
-                  .filter((issue) => {
-                    if (!issue || typeof issue !== "object") return false;
-                    const severity = (issue as { severity?: unknown }).severity;
-                    const sceneId = (issue as { sceneId?: unknown }).sceneId;
-                    return severity === "error" && typeof sceneId === "number";
-                  })
-                  .map((issue) => (issue as { sceneId: number }).sceneId)
-              ),
-            ];
+            const errorSceneIds = validationSummary.errorSceneIds;
 
             if (
               report &&
@@ -727,14 +893,50 @@ async function runProcessJob(job: ProcessJob): Promise<void> {
               const retryScenes = narrativeScenesCache.filter((s) =>
                 errorSceneIds.includes(s.id)
               );
+              log("Phase corrective déclenchée", {
+                jobId: job.id,
+                correctionAttempt: retryCount,
+                maxRetries: 2,
+                retryScenesCount: retryScenes.length,
+                retrySceneIds: retryScenes.map((s) => s.id),
+                retrySceneTitles: retryScenes.map((s) => s.title),
+                validationSceneBreakdown: validationSummary.sceneBreakdown,
+              });
 
               publishProcessJobEvent(job, "step:start", {
                 step: "summarizer",
-                label: `Correction parallèle des ${retryScenes.length} scène(s) en erreur (tentative ${retryCount + 1})...`,
-                data: { totalScenes: retryScenes.length, retryCount },
+                label: `Correction parallèle des ${retryScenes.length} scène(s) en erreur (tentative ${retryCount})...`,
+                data: {
+                  totalScenes: retryScenes.length,
+                  retryCount,
+                  retrySceneIds: retryScenes.map((s) => s.id),
+                },
               });
               sendSceneCollection("summarizer", retryScenes);
             } else {
+              if (report && !report.isValid && retryCount >= 2) {
+                log("Phase corrective arrêtée: limite de tentatives atteinte", {
+                  jobId: job.id,
+                  retryCount,
+                  maxRetries: 2,
+                  remainingErrorSceneIds: errorSceneIds,
+                });
+              } else if (report && !report.isValid && errorSceneIds.length === 0) {
+                log(
+                  "Phase corrective non déclenchée: aucune scène en erreur ciblable",
+                  {
+                    jobId: job.id,
+                    retryCount,
+                    issuesCount: validationSummary.issuesCount,
+                  }
+                );
+              } else {
+                log("Validation finale: passage au formatter", {
+                  jobId: job.id,
+                  retryCount,
+                  isValid: report?.isValid,
+                });
+              }
               publishProcessJobEvent(job, "step:start", {
                 step: "formatter",
                 label: "Mise en forme du compte-rendu...",
@@ -755,7 +957,14 @@ async function runProcessJob(job: ProcessJob): Promise<void> {
               label: "Compte-rendu généré !",
             });
 
-            // Save report and workflow state to SQLite
+            // Build the workflow state to persist (exclude heavy/transient fields)
+            const { messages, rawTranscript: _rt, preprocessedTranscript: _pt, currentStep: _cs, finalReport: _fr, ...nodeOutputs } = accumulatedState as Record<string, unknown>;
+            const persistableState = {
+              ...nodeOutputs,
+              playerInfo: job.playerInfo,
+              universeName: job.universeName,
+            };
+
             const reportId = randomUUID();
             try {
               insertReport({
@@ -765,7 +974,11 @@ async function runProcessJob(job: ProcessJob): Promise<void> {
                 universeName: job.universeName,
                 transcriptName: job.transcriptName,
                 players: job.playerInfo,
-                workflowState: output as Record<string, unknown>,
+                workflowState: persistableState,
+                rawTranscript: job.input.rawTranscript,
+                preprocessedTranscript: accumulatedState.preprocessedTranscript as string ?? null,
+                universeContext: job.input.universeContext || null,
+                sessionHistory: job.input.sessionHistory || null,
               });
               log("Report saved to SQLite", { reportId, jobId: job.id });
             } catch (dbErr) {
@@ -778,8 +991,8 @@ async function runProcessJob(job: ProcessJob): Promise<void> {
             publishProcessJobEvent(job, "result", {
               reportId,
               finalReport: output.finalReport,
-              scenes: output.scenes,
-              entities: output.entities,
+              scenes: accumulatedState.scenes,
+              entities: accumulatedState.entities,
               job: {
                 id: job.id,
                 universeName: job.universeName,
@@ -852,8 +1065,8 @@ app.get("/api/reports/:id", (req, res) => {
     res.status(404).json({ message: "Rapport introuvable." });
     return;
   }
-  // Don't send workflow state in the detail response (too large)
-  const { workflowState, ...rest } = report;
+  // Don't send heavy fields in the detail response
+  const { workflowState, rawTranscript, preprocessedTranscript, universeContext, sessionHistory, ...rest } = report;
   res.json(rest);
 });
 
@@ -908,39 +1121,141 @@ app.post("/api/reports/:id/correct", async (req, res) => {
   }
 
   try {
-    const model = createModel("pro", 0.15);
+    const model = createModel("correction", 0.15);
 
     const currentReport = report.reportMd;
     const previousReport = currentReport;
+
+    const section = extractSectionContaining(currentReport, selectedText);
+
+    // ── Build transcript & analysis context from stored data ──
+    const ws = report.workflowState ?? {};
+    const scenes = (ws.scenes as SceneMeta[]) ?? [];
+    const speakerMap = (ws.speakerMap as Record<string, string>) ?? {};
+    const entities = ws.entities as { pcs?: unknown[]; npcs?: unknown[]; locations?: string[]; items?: string[] } | undefined;
+    const characterProfiles = (ws.characterProfiles as Array<{ characterName: string; playerName: string; knownAbilities?: string[]; roleInGroup?: string }>) ?? [];
+
+    let transcriptContext = "";
+    let matchedSceneTitle = "";
+
+    if (report.preprocessedTranscript && scenes.length > 0) {
+      // Find which scene(s) the section corresponds to by matching ## headings
+      const sectionHeadingMatch = section.text.match(/^## (.+)$/m);
+      const matchedScene = sectionHeadingMatch
+        ? scenes.find((s) => s.title === sectionHeadingMatch[1])
+        : null;
+
+      if (matchedScene) {
+        matchedSceneTitle = matchedScene.title;
+        transcriptContext = extractSceneText(
+          report.preprocessedTranscript,
+          matchedScene.startLine,
+          matchedScene.endLine
+        );
+      }
+    }
+
+    const contextParts: string[] = [];
+
+    if (Object.keys(speakerMap).length > 0) {
+      const mapLines = Object.entries(speakerMap)
+        .map(([speaker, name]) => `- ${speaker} → ${name}`)
+        .join("\n");
+      contextParts.push(`## Correspondance Speakers\n${mapLines}`);
+    }
+
+    if (characterProfiles.length > 0) {
+      const profileLines = characterProfiles
+        .map((p) => {
+          let line = `- **${p.characterName}** (${p.playerName})`;
+          if (p.roleInGroup) line += ` — ${p.roleInGroup}`;
+          if (p.knownAbilities?.length) line += ` | Capacités: ${p.knownAbilities.join(", ")}`;
+          return line;
+        })
+        .join("\n");
+      contextParts.push(`## Personnages-Joueurs\n${profileLines}`);
+    }
+
+    if (entities?.npcs && Array.isArray(entities.npcs) && entities.npcs.length > 0) {
+      const npcLines = entities.npcs
+        .map((n: any) => {
+          let line = `- **${n.name}**`;
+          if (n.role) line += ` — ${n.role}`;
+          return line;
+        })
+        .join("\n");
+      contextParts.push(`## PNJs connus\n${npcLines}`);
+    }
+
+    if (report.sessionHistory) {
+      contextParts.push(`## Historique des sessions précédentes\n${report.sessionHistory}`);
+    }
+
+    const globalContext = contextParts.length > 0
+      ? `\n\n# Contexte de référence\n\n${contextParts.join("\n\n")}`
+      : "";
+
+    const transcriptBlock = transcriptContext
+      ? `\n\n## Transcript original de la scène "${matchedSceneTitle}"\n\nVoici les lignes exactes du transcript correspondant à cette section. Utilise-les comme source de vérité pour valider les faits, attributions de paroles et actions.\n\n\`\`\`\n${transcriptContext}\n\`\`\``
+      : "";
+
+    log("Correction ciblée: demande reçue", {
+      reportId,
+      selectedTextLength: selectedText.length,
+      instructionLength: instruction.length,
+      selectedTextPreview: toSingleLinePreview(selectedText),
+      instructionPreview: toSingleLinePreview(instruction),
+      selectionFoundInReport: section.selectionFound,
+      sectionLength: section.text.length,
+      hasTranscriptContext: !!transcriptContext,
+      matchedScene: matchedSceneTitle || null,
+      transcriptContextLines: transcriptContext ? transcriptContext.split("\n").length : 0,
+      hasGlobalContext: contextParts.length > 0,
+    });
 
     const correctionResponse = await model.invoke([
       new SystemMessage(
         `Tu es un expert en édition de comptes-rendus de JDR au format Markdown.\n\n` +
         `## Ta mission\n` +
-        `On te donne un compte-rendu Markdown complet et une demande de correction ciblée.\n` +
-        `Tu dois appliquer la correction demandée en modifiant UNIQUEMENT la partie concernée.\n\n` +
+        `On te donne UNE SECTION d'un compte-rendu et une demande de correction ciblée.\n` +
+        `Tu dois retourner UNIQUEMENT la section corrigée.\n\n` +
         `## Règles\n` +
-        `- Retourne le compte-rendu Markdown COMPLET avec la correction appliquée\n` +
-        `- Ne modifie QUE ce qui est demandé, garde tout le reste strictement identique\n` +
+        `- Retourne UNIQUEMENT la section modifiée (pas le rapport complet)\n` +
+        `- Ne modifie QUE ce qui est demandé par l'instruction\n` +
         `- Conserve le même style, la même structure, le même formatage Markdown\n` +
-        `- Si la correction concerne l'attribution d'une action (qui a fait quoi), sois précis\n` +
+        `- Si la correction concerne l'attribution d'une action (qui a fait quoi), vérifie dans le transcript original qui parle/agit réellement\n` +
+        `- Le transcript original fait foi : les tags [SPEAKER_XX] identifient les locuteurs, utilise la correspondance speakers pour les nommer\n` +
         `- Ne supprime jamais de contenu sauf si explicitement demandé\n` +
-        `- Ne rajoute pas de contenu non demandé\n`
+        `- Ne rajoute pas de contenu non demandé\n` +
+        `- La sortie doit pouvoir remplacer directement la section dans le document original\n` +
+        globalContext
       ),
       new HumanMessage(
-        `## Compte-rendu actuel\n\n${currentReport}\n\n` +
-        `## Passage sélectionné par l'utilisateur\n\n"${selectedText}"\n\n` +
+        `## Section à modifier\n\n${section.text}\n\n` +
+        transcriptBlock +
+        `\n\n## Passage sélectionné par l'utilisateur\n\n"${selectedText}"\n\n` +
         `## Correction demandée\n\n${instruction}\n\n` +
-        `Retourne le compte-rendu complet avec la correction appliquée. Uniquement le Markdown, rien d'autre.`
+        `Retourne UNIQUEMENT la section corrigée. Rien d'autre.`
       ),
     ]);
 
-    const correctedReport =
+    const correctedSection =
       typeof correctionResponse.content === "string"
         ? correctionResponse.content
         : JSON.stringify(correctionResponse.content);
+    const sectionChanged = correctedSection.trim() !== section.text.trim();
+    log("Correction ciblée: réponse modèle reçue", {
+      reportId,
+      correctedSectionLength: correctedSection.length,
+      sectionDeltaLength: correctedSection.length - section.text.length,
+      sectionChanged,
+      correctedSectionPreview: toSingleLinePreview(correctedSection, 220),
+    });
 
-    // Save the correction and update the report
+    const correctedReport = currentReport.slice(0, section.start) +
+      correctedSection +
+      currentReport.slice(section.end);
+
     const correctionId = randomUUID();
     insertCorrection({
       id: correctionId,
@@ -951,7 +1266,16 @@ app.post("/api/reports/:id/correct", async (req, res) => {
     });
     updateReportMd(reportId, correctedReport);
 
-    log("Correction applied", { reportId, correctionId });
+    log("Correction applied (targeted)", {
+      reportId,
+      correctionId,
+      instructionPreview: toSingleLinePreview(instruction),
+      selectedTextPreview: toSingleLinePreview(selectedText),
+      sectionLength: section.text.length,
+      correctedSectionLength: correctedSection.length,
+      reportChanged: correctedReport !== currentReport,
+      fullReportLength: currentReport.length,
+    });
 
     res.json({
       reportId,
@@ -980,14 +1304,39 @@ app.get("/api/reports/:id/scenes", (req, res) => {
 
   const workflowState = report.workflowState as Record<string, unknown>;
   const scenes = (workflowState?.scenes as SceneMeta[]) || [];
-  const sceneSummaries = (workflowState?.sceneSummaries as unknown[]) || [];
+  const sceneSummaries = (workflowState?.sceneSummaries as Array<{ sceneId: number }>) || [];
+
+  const summaryById = new Map(sceneSummaries.map((s) => [s.sceneId, s]));
 
   res.json({
-    scenes: scenes.map((scene, idx) => ({
+    scenes: scenes.map((scene) => ({
       ...scene,
-      summary: sceneSummaries[idx] || null,
+      summary: summaryById.get(scene.id) || null,
     })),
   });
+});
+
+const SceneMetadataSchema = z.object({
+  diceRolls: z
+    .array(
+      z.object({
+        character: z.string().describe("Personnage qui lance le dé"),
+        skill: z.string().describe("Compétence ou sphère utilisée"),
+        result: z.string().describe("Résultat du jet (succès/échec/détails)"),
+        context: z.string().describe("Contexte de l'action"),
+      })
+    )
+    .describe("Jets de dés mentionnés dans le récit"),
+  npcsInvolved: z
+    .array(z.string())
+    .describe("PNJs mentionnés ou impliqués dans cette scène"),
+  technicalNotes: z
+    .array(z.string())
+    .optional()
+    .describe("Notes techniques, règles, points d'attention"),
+  keyEvents: z
+    .array(z.string())
+    .describe("Événements clés de la scène"),
 });
 
 app.put("/api/reports/:id/scenes/:sceneId", async (req, res) => {
@@ -1017,8 +1366,9 @@ app.put("/api/reports/:id/scenes/:sceneId", async (req, res) => {
   try {
     const workflowState = report.workflowState as Record<string, unknown>;
     const sceneSummaries = (workflowState?.sceneSummaries as Array<Record<string, unknown>>) || [];
+    const scenes = (workflowState?.scenes as SceneMeta[]) || [];
+    const speakerMap = (workflowState?.speakerMap as Record<string, string>) ?? {};
 
-    // Find and update the scene summary
     const sceneIndex = sceneSummaries.findIndex(
       (s) => s.sceneId === sceneId
     );
@@ -1028,13 +1378,75 @@ app.put("/api/reports/:id/scenes/:sceneId", async (req, res) => {
       return;
     }
 
-    // Update the narrative summary
-    sceneSummaries[sceneIndex] = {
+    const scene = scenes.find((s) => s.id === sceneId);
+
+    // Re-extract metadata from the updated narrative via LLM
+    let extractedMetadata: z.infer<typeof SceneMetadataSchema> | null = null;
+    try {
+      const model = createModel("correction", 0.1);
+      const structuredModel = model.withStructuredOutput(SceneMetadataSchema);
+
+      let transcriptHint = "";
+      if (report.preprocessedTranscript && scene) {
+        const sceneTranscript = extractSceneText(
+          report.preprocessedTranscript,
+          scene.startLine,
+          scene.endLine
+        );
+        if (sceneTranscript) {
+          transcriptHint = `\n\n## Transcript original de la scène (pour référence)\n\`\`\`\n${sceneTranscript}\n\`\`\``;
+        }
+      }
+
+      const speakerHint = Object.keys(speakerMap).length > 0
+        ? `\n\nCorrespondance speakers : ${Object.entries(speakerMap).map(([k, v]) => `${k} → ${v}`).join(", ")}`
+        : "";
+
+      extractedMetadata = await structuredModel.invoke([
+        new SystemMessage(
+          `Tu es un assistant d'analyse de comptes-rendus de JDR.\n` +
+          `Extrais les métadonnées structurées du récit narratif fourni.\n` +
+          `- diceRolls : uniquement les jets de dés explicitement mentionnés dans le récit\n` +
+          `- npcsInvolved : les PNJs (pas les PJs) mentionnés dans le récit\n` +
+          `- technicalNotes : observations techniques ou mécaniques pertinentes\n` +
+          `- keyEvents : événements clés dans l'ordre chronologique` +
+          speakerHint
+        ),
+        new HumanMessage(
+          `## Récit narratif de la scène\n\n${narrativeSummary}` +
+          transcriptHint
+        ),
+      ]);
+
+      log("Scene metadata re-extracted", {
+        reportId,
+        sceneId,
+        diceRollsCount: extractedMetadata.diceRolls.length,
+        npcsCount: extractedMetadata.npcsInvolved.length,
+        keyEventsCount: extractedMetadata.keyEvents.length,
+      });
+    } catch (metaErr) {
+      log("Scene metadata extraction failed, keeping existing metadata", {
+        reportId,
+        sceneId,
+        error: metaErr instanceof Error ? metaErr.message : String(metaErr),
+      });
+    }
+
+    const updatedSummary: Record<string, unknown> = {
       ...sceneSummaries[sceneIndex],
       narrativeSummary,
     };
 
-    // Update workflow state
+    if (extractedMetadata) {
+      updatedSummary.diceRolls = extractedMetadata.diceRolls;
+      updatedSummary.npcsInvolved = extractedMetadata.npcsInvolved;
+      updatedSummary.technicalNotes = extractedMetadata.technicalNotes ?? [];
+      updatedSummary.keyEvents = extractedMetadata.keyEvents;
+    }
+
+    sceneSummaries[sceneIndex] = updatedSummary;
+
     const updatedWorkflowState = {
       ...workflowState,
       sceneSummaries,
@@ -1055,6 +1467,7 @@ app.put("/api/reports/:id/scenes/:sceneId", async (req, res) => {
       reportId,
       sceneId,
       reportMd: newReport,
+      updatedSummary,
     });
   } catch (err) {
     log("Scene update error", {
@@ -1064,6 +1477,132 @@ app.put("/api/reports/:id/scenes/:sceneId", async (req, res) => {
     });
     res.status(500).json({
       message: err instanceof Error ? err.message : "Erreur lors de la mise à jour de la scène.",
+    });
+  }
+});
+
+// ── Report rebuild (re-format from existing summaries, no LLM call) ─────────
+
+app.post("/api/reports/:id/rebuild", async (req, res) => {
+  const reportId = req.params.id;
+  const report = getReport(reportId);
+  if (!report) {
+    res.status(404).json({ message: "Rapport introuvable." });
+    return;
+  }
+
+  try {
+    const workflowState = report.workflowState as Record<string, unknown>;
+    const scenes = (workflowState?.scenes as SceneMeta[]) || [];
+    const sceneSummaries = (workflowState?.sceneSummaries as Array<Record<string, unknown>>) || [];
+
+    log("Rebuild report: démarrage", {
+      reportId,
+      scenesCount: scenes.length,
+      summariesCount: sceneSummaries.length,
+    });
+
+    const { formatterNode } = await import("./agents/formatter.js");
+    const formatterResult = await formatterNode(workflowState as any);
+    const newReport = formatterResult.finalReport as string;
+
+    updateReportMd(reportId, newReport);
+
+    log("Rebuild report: terminé", { reportId, reportLength: newReport.length });
+
+    res.json({ reportId, reportMd: newReport });
+  } catch (err) {
+    log("Rebuild report: erreur", {
+      reportId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    res.status(500).json({
+      message: err instanceof Error ? err.message : "Erreur lors de la reconstruction du rapport.",
+    });
+  }
+});
+
+// ── Scene regeneration ───────────────────────────────────────────────────────
+
+app.post("/api/reports/:id/scenes/:sceneId/regenerate", async (req, res) => {
+  const reportId = req.params.id;
+  const sceneId = Number.parseInt(req.params.sceneId, 10);
+
+  if (!Number.isFinite(sceneId)) {
+    res.status(400).json({ message: "ID de scène invalide." });
+    return;
+  }
+
+  const report = getReport(reportId);
+  if (!report) {
+    res.status(404).json({ message: "Rapport introuvable." });
+    return;
+  }
+
+  if (!report.preprocessedTranscript) {
+    res.status(400).json({ message: "Transcript préprocessé non disponible pour ce rapport." });
+    return;
+  }
+
+  try {
+    const workflowState = report.workflowState as Record<string, unknown>;
+    const scenes = (workflowState?.scenes as SceneMeta[]) || [];
+    const sceneSummaries = (workflowState?.sceneSummaries as Array<Record<string, unknown>>) || [];
+
+    const scene = scenes.find((s) => s.id === sceneId);
+    if (!scene) {
+      res.status(404).json({ message: "Scène introuvable dans le workflow." });
+      return;
+    }
+
+    const userInstruction = typeof req.body?.instruction === "string" ? req.body.instruction.trim() : "";
+    log("Régénération scène: demande", { reportId, sceneId, title: scene.title, hasInstruction: !!userInstruction });
+
+    const { summarizeSingleScene } = await import("./agents/summarizer.js");
+
+    const newSummary = await summarizeSingleScene(sceneId, {
+      scenes: scenes as any,
+      preprocessedTranscript: report.preprocessedTranscript,
+      universeContext: report.universeContext || "",
+      speakerMap: (workflowState?.speakerMap as Record<string, string>) ?? {},
+      entities: (workflowState?.entities as any) ?? { pcs: [], npcs: [], locations: [], items: [] },
+      characterProfiles: (workflowState?.characterProfiles as any[]) ?? [],
+      playerInfo: report.players as any,
+    }, userInstruction || undefined);
+
+    const existingIndex = sceneSummaries.findIndex((s) => s.sceneId === sceneId);
+    if (existingIndex >= 0) {
+      sceneSummaries[existingIndex] = newSummary as unknown as Record<string, unknown>;
+    } else {
+      sceneSummaries.push(newSummary as unknown as Record<string, unknown>);
+      sceneSummaries.sort((a, b) => (a.sceneId as number) - (b.sceneId as number));
+    }
+
+    const updatedWorkflowState = { ...workflowState, sceneSummaries };
+    updateReportWorkflowState(reportId, updatedWorkflowState);
+
+    const { formatterNode } = await import("./agents/formatter.js");
+    const formatterResult = await formatterNode(updatedWorkflowState as any);
+    const newReport = formatterResult.finalReport as string;
+
+    updateReportMd(reportId, newReport);
+
+    log("Régénération scène: terminée", { reportId, sceneId });
+
+    res.json({
+      reportId,
+      sceneId,
+      reportMd: newReport,
+      regeneratedSummary: newSummary,
+    });
+  } catch (err) {
+    log("Régénération scène: erreur", {
+      reportId,
+      sceneId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    res.status(500).json({
+      message: err instanceof Error ? err.message : "Erreur lors de la régénération de la scène.",
     });
   }
 });
@@ -1152,6 +1691,12 @@ app.post("/api/process", upload.single("transcript"), (req, res) => {
 app.get("/api/health", (_req, res) => {
   res.json({ status: "ok", hasApiKey: !!process.env.GOOGLE_API_KEY });
 });
+
+if (!isProduction) {
+  app.get("/", (_req, res) => {
+    res.redirect(frontendDevUrl);
+  });
+}
 
 if (isProduction && existsSync(frontendDistDir)) {
   app.get("*", (req, res, next) => {

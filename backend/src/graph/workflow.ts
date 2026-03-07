@@ -38,13 +38,26 @@ function preprocessorNode(
 function validatorRouter(
   state: WorkflowStateType
 ): "formatter" | "summarizer" {
-  const hasErrors = state.validationReport.issues.some(
-    (i) => i.severity === "error"
-  );
-  if (hasErrors && state.retryCount < MAX_RETRIES) {
-    return "summarizer";
-  }
-  return "formatter";
+  const issues = state.validationReport.issues;
+  const errorsCount = issues.filter((i) => i.severity === "error").length;
+  const warningsCount = issues.filter((i) => i.severity === "warning").length;
+  const infosCount = issues.filter((i) => i.severity === "info").length;
+  const hasErrors = errorsCount > 0;
+  const canRetry = hasErrors && state.retryCount < MAX_RETRIES;
+  const nextNode = canRetry ? "summarizer" : "formatter";
+  log("Routage validator", {
+    isValid: state.validationReport.isValid,
+    retryCount: state.retryCount,
+    maxRetries: MAX_RETRIES,
+    issuesCount: issues.length,
+    errorsCount,
+    warningsCount,
+    infosCount,
+    pendingSceneIds: state.pendingSceneIds,
+    canRetry,
+    nextNode,
+  });
+  return nextNode;
 }
 
 // ── Build the workflow graph ─────────────────────────────────────────────────

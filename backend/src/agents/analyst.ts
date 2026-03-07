@@ -1,10 +1,10 @@
-import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 import { z } from "zod";
 import {
   WorkflowStateType,
   SceneSchema,
   EntitySchema,
+  CharacterProfileSchema,
 } from "../graph/state.js";
 import { ANALYST_SYSTEM_PROMPT } from "../config/prompts.js";
 import { createModel } from "../config/llm.js";
@@ -15,8 +15,6 @@ const log = (msg: string, data?: Record<string, unknown>) => {
 };
 
 // ── Structured output schema for the analyst ─────────────────────────────────
-// Note: Gemini n'accepte pas z.record() (objets à clés dynamiques).
-// On utilise un tableau de paires qu'on convertit en Record.
 
 const SpeakerEntrySchema = z.object({
   speakerId: z.string().describe("Ex: SPEAKER_00"),
@@ -31,6 +29,11 @@ const AnalystOutputSchema = z.object({
     ),
   entities: EntitySchema,
   scenes: z.array(SceneSchema),
+  characterProfiles: z
+    .array(CharacterProfileSchema)
+    .describe(
+      "Profils détaillés de chaque PJ avec compétences, limitations, patterns de parole et rôle"
+    ),
 });
 
 // ── Analyst node ─────────────────────────────────────────────────────────────
@@ -41,15 +44,16 @@ export async function analystNode(
   log("Début nœud: analyst", {
     transcriptLines: state.preprocessedTranscript.split("\n").length,
   });
-  const model = createModel("pro", 0.2);
+  const model = createModel("analyst", 0.2);
 
-  // Build the system prompt with context
   const playerInfoStr = state.playerInfo.length
     ? state.playerInfo
-        .map(
-          (p) =>
-            `- ${p.playerName} joue ${p.characterName}${p.speakerHint ? ` (probablement ${p.speakerHint})` : ""}`
-        )
+        .map((p) => {
+          let line = `- ${p.playerName} joue ${p.characterName}`;
+          if (p.speakerHint) line += ` (probablement ${p.speakerHint})`;
+          if (p.characterDetails) line += `\n  Détails : ${p.characterDetails}`;
+          return line;
+        })
         .join("\n")
     : "Aucune information sur les joueurs fournie. Déduis-les du transcript.";
 
@@ -63,7 +67,6 @@ export async function analystNode(
       state.sessionHistory || "Aucun historique de session précédente."
     );
 
-  // Use structured output
   const structuredModel = model.withStructuredOutput(AnalystOutputSchema);
 
   const result = await structuredModel.invoke([
@@ -76,12 +79,10 @@ export async function analystNode(
     ),
   ]);
 
-  // Convert array to Record for the rest of the pipeline
   const speakerMapRecord: Record<string, string> = Object.fromEntries(
     result.speakerMap.map((s) => [s.speakerId, s.identification])
   );
 
-  // File d'attente pour le summarizer : une scène = une invocation de nœud
   const pendingSceneIds = result.scenes
     .filter((s) => s.type !== "meta" && s.type !== "pause")
     .map((s) => s.id);
@@ -90,12 +91,14 @@ export async function analystNode(
     scenesCount: result.scenes.length,
     narrativeScenesCount: pendingSceneIds.length,
     speakersCount: result.speakerMap.length,
+    characterProfilesCount: result.characterProfiles.length,
   });
 
   return {
     speakerMap: speakerMapRecord,
     entities: result.entities,
     scenes: result.scenes,
+    characterProfiles: result.characterProfiles,
     pendingSceneIds,
     currentSceneIndex: 0,
     currentStep: "analyst_complete",

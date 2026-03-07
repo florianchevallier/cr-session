@@ -11,6 +11,12 @@ export const PlayerInfoSchema = z.object({
     .string()
     .optional()
     .describe("Indice de speaker dans le transcript (ex: SPEAKER_00)"),
+  characterDetails: z
+    .string()
+    .optional()
+    .describe(
+      "Infos libres sur le personnage : compétences, sphères, classe, rôle, limitations, etc."
+    ),
 });
 
 export const SceneSchema = z.object({
@@ -65,6 +71,31 @@ export const SceneSummarySchema = z.object({
     .describe("Jets de dés importants"),
   npcsInvolved: z.array(z.string()).describe("PNJs impliqués"),
   technicalNotes: z.array(z.string()).optional().describe("Notes techniques"),
+});
+
+export const CharacterProfileSchema = z.object({
+  characterName: z.string().describe("Nom du personnage-joueur"),
+  playerName: z.string().describe("Nom du joueur"),
+  knownAbilities: z
+    .array(z.string())
+    .describe(
+      "Compétences, sphères, pouvoirs observés ou mentionnés dans le transcript"
+    ),
+  prohibitedAbilities: z
+    .array(z.string())
+    .describe(
+      "Compétences/pouvoirs que ce personnage NE maîtrise clairement PAS"
+    ),
+  speechPatterns: z
+    .array(z.string())
+    .describe(
+      "Expressions récurrentes, tics de langage, centres d'intérêt distinctifs"
+    ),
+  roleInGroup: z
+    .string()
+    .describe(
+      "Rôle narratif et mécanique dans le groupe (ex: combattant, soigneur, éclaireur)"
+    ),
 });
 
 export const ValidationIssueSchema = z.object({
@@ -125,6 +156,11 @@ export const WorkflowState = Annotation.Root({
   entities: Annotation<z.infer<typeof EntitySchema>>({
     reducer: (_, b) => b,
     default: () => ({ pcs: [], npcs: [], locations: [], items: [] }),
+  }),
+
+  characterProfiles: Annotation<z.infer<typeof CharacterProfileSchema>[]>({
+    reducer: (_, b) => b,
+    default: () => [],
   }),
 
   // ── Summarizer: file d'attente et progression (une scène par invocation) ──

@@ -1,87 +1,132 @@
-import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 import { WorkflowStateType } from "../graph/state.js";
-import { FORMATTER_SYSTEM_PROMPT } from "../config/prompts.js";
-import { createModel } from "../config/llm.js";
 
 const log = (msg: string, data?: Record<string, unknown>) => {
   const payload = data ? ` ${JSON.stringify(data)}` : "";
   console.log(`[cr] ${msg}${payload}`);
 };
 
-// ── Formatter node ───────────────────────────────────────────────────────────
-
-export async function formatterNode(
+export function formatterNode(
   state: WorkflowStateType
-): Promise<Partial<WorkflowStateType>> {
-  log("Début nœud: formatter", {
+): Partial<WorkflowStateType> {
+  log("Début nœud: formatter (assemblage code)", {
     scenesCount: state.sceneSummaries.length,
   });
-  const model = createModel("pro", 0.25);
 
-  const playerInfoStr = state.playerInfo
-    .map((p) => `| ${p.playerName} | ${p.characterName} |`)
-    .join("\n");
-
-  const systemPrompt = FORMATTER_SYSTEM_PROMPT.replace(
-    "{universeName}",
-    state.universeName || "Générique"
-  ).replace("{playerInfo}", playerInfoStr);
-
-  // Build the content for the formatter
   const orderedSummaries = [...state.sceneSummaries].sort(
     (a, b) => a.sceneId - b.sceneId
   );
 
-  const scenesContent = orderedSummaries
-    .map((s) => {
-      const scene = state.scenes.find((sc) => sc.id === s.sceneId);
-      const narrativeWordCount = s.narrativeSummary
-        .split(/\s+/)
-        .filter(Boolean).length;
-      return (
-        `## SCENE_ID: ${s.sceneId}\n` +
-        `TITLE: ${scene?.title || "Sans titre"}\n` +
-        `TYPE: ${scene?.type || "?"}\n` +
-        `LOCATION: ${scene?.location || "?"}\n` +
-        `NARRATIVE_WORD_COUNT: ${narrativeWordCount}\n` +
-        `NARRATIVE:\n${s.narrativeSummary}\n` +
-        `KEY_EVENTS:\n${s.keyEvents.map((e) => `- ${e}`).join("\n")}\n` +
-        `DICE_ROLLS:\n${s.diceRolls.map((d) => `- ${d.character} — ${d.skill} : ${d.result} (${d.context})`).join("\n")}\n` +
-        `NPCS: ${s.npcsInvolved.join(", ")}\n` +
-        `TECH_NOTES:\n${(s.technicalNotes || []).map((n) => `- ${n}`).join("\n")}`
-      );
-    })
-    .join("\n\n===\n\n");
+  const parts: string[] = [];
 
-  const entitiesStr = JSON.stringify(state.entities, null, 2);
+  // ── Header ──
 
-  // Validation warnings to include
-  const warnings = state.validationReport.issues
-    .filter((i) => i.severity === "warning" || i.severity === "info")
-    .map((i) => `- [${i.severity}] ${i.issue}`)
-    .join("\n");
+  parts.push(`# Compte-Rendu de Session — ${state.universeName || "JDR"}`);
+  parts.push("");
 
-  const response = await model.invoke([
-    new SystemMessage(systemPrompt),
-    new HumanMessage(
-      `## Données à formater\n\n` +
-        `### Scènes\n\n${scenesContent}\n\n` +
-        `### Entités complètes\n\n${entitiesStr}\n\n` +
-        (warnings
-          ? `### Notes du validateur\n\n${warnings}\n\n`
-          : "") +
-        `## Contraintes impératives\n` +
-        `- Respecte l'ordre strict des SCENE_ID (chronologie de session).\n` +
-        `- Conserve le bloc NARRATIVE de façon fidèle et détaillée : ne le compresse pas, n'en retire pas les nuances.\n` +
-        `- N'invente aucun événement, aucun dialogue, aucun PNJ.\n\n` +
-        `Génère maintenant le compte-rendu Markdown final complet.`
-    ),
-  ]);
+  if (state.playerInfo.length > 0) {
+    parts.push("| Joueur | Personnage |");
+    parts.push("|--------|------------|");
+    for (const p of state.playerInfo) {
+      parts.push(`| ${p.playerName} | ${p.characterName} |`);
+    }
+    parts.push("");
+  }
 
-  const finalReport =
-    typeof response.content === "string"
-      ? response.content
-      : JSON.stringify(response.content);
+  // ── Global summary from analyst scene summaries ──
+
+  const sceneSynopses = state.scenes
+    .filter((s) => s.type !== "meta" && s.type !== "pause" && s.summary)
+    .map((s) => s.summary!);
+
+  if (sceneSynopses.length > 0) {
+    parts.push("## Résumé de la Session");
+    parts.push("");
+    parts.push(sceneSynopses.join(" "));
+    parts.push("");
+  }
+
+  // ── Scenes ──
+
+  for (const summary of orderedSummaries) {
+    const scene = state.scenes.find((s) => s.id === summary.sceneId);
+    if (!scene || scene.type === "meta" || scene.type === "pause") continue;
+
+    parts.push("---");
+    parts.push("");
+    parts.push(`## ${scene.title}`);
+    parts.push("");
+
+    if (scene.location) {
+      parts.push(`*📍 ${scene.location}*`);
+      parts.push("");
+    }
+
+    parts.push(summary.narrativeSummary);
+    parts.push("");
+
+    const hasDiceRolls = summary.diceRolls.length > 0;
+    const hasNpcs = summary.npcsInvolved.length > 0;
+    const techNotes = summary.technicalNotes ?? [];
+    const hasTechNotes = techNotes.length > 0;
+
+    if (hasDiceRolls || hasNpcs || hasTechNotes) {
+      if (hasDiceRolls) {
+        parts.push("> **🎲 Jets de dés**");
+        for (const d of summary.diceRolls) {
+          parts.push(
+            `> - **${d.character}** — ${d.skill} : ${d.result} *(${d.context})*`
+          );
+        }
+        parts.push(">");
+      }
+
+      if (hasNpcs) {
+        parts.push(
+          `> **👥 PNJs impliqués** : ${summary.npcsInvolved.join(", ")}`
+        );
+        parts.push(">");
+      }
+
+      if (hasTechNotes) {
+        parts.push("> **📝 Notes techniques**");
+        for (const n of techNotes) {
+          parts.push(`> - ${n}`);
+        }
+      }
+
+      parts.push("");
+    }
+  }
+
+  // ── Annexes ──
+
+  parts.push("---");
+  parts.push("");
+  parts.push("## Annexes");
+  parts.push("");
+
+  if (state.entities.npcs.length > 0) {
+    parts.push("### PNJs Rencontrés");
+    parts.push("");
+    for (const npc of state.entities.npcs) {
+      let line = `- **${npc.name}**`;
+      if (npc.role) line += ` — ${npc.role}`;
+      if (npc.description) line += ` : ${npc.description}`;
+      parts.push(line);
+    }
+    parts.push("");
+  }
+
+  if (state.entities.locations.length > 0) {
+    parts.push("### Lieux Visités");
+    parts.push("");
+    for (const loc of state.entities.locations) {
+      parts.push(`- ${loc}`);
+    }
+    parts.push("");
+  }
+
+  const finalReport = parts.join("\n");
 
   log("Fin nœud: formatter", { reportLength: finalReport.length });
 

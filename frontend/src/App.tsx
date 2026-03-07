@@ -247,7 +247,11 @@ export default function App() {
   };
 
   return (
-    <div className="mx-auto max-w-3xl px-4 py-12">
+    <div
+      className={`mx-auto px-4 py-12 ${
+        step === "result" ? "max-w-6xl" : "max-w-3xl"
+      }`}
+    >
       {/* Header */}
       <header className="mb-10 text-center">
         <div className="mb-3 flex items-center justify-center gap-3">
@@ -310,7 +314,13 @@ export default function App() {
               setPlayers(
                 defaultPlayers.length > 0
                   ? defaultPlayers
-                  : [{ playerName: "", characterName: "", speakerHint: "" }]
+                  : [
+                      {
+                        playerName: "",
+                        characterName: "",
+                        speakerHint: "",
+                      },
+                    ]
               );
             }}
           />
