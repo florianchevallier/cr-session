@@ -23,7 +23,7 @@ import type {
   ReportSummary,
   ReportDetail,
 } from "./lib/api";
-import packageJson from "../package.json";
+import packageJson from "../../package.json";
 
 type AppStep = "config" | "processing" | "result";
 const APP_VERSION = packageJson.version;
