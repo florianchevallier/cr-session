@@ -247,6 +247,8 @@ export interface SceneMeta {
   startLine: number;
   endLine: number;
   location?: string;
+  analystSummary?: string | null;
+  transcriptExcerpt?: string | null;
 }
 
 export interface SceneSummary {

@@ -12,6 +12,7 @@ import {
   ChevronDown,
   ChevronUp,
   Hammer,
+  Eye,
   EyeOff,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -56,6 +57,8 @@ function SceneChip({
   isInReport: boolean;
 }) {
   const isExcluded = scene.type === "meta" || scene.type === "pause";
+  const [showMaskedDetails, setShowMaskedDetails] = useState(false);
+  const hasMaskedDetails = isExcluded && (!!scene.transcriptExcerpt || !!scene.analystSummary);
   const hasSummary = !!scene.summary;
   const isMissing = !isExcluded && !hasSummary;
   const isOutOfReport = !isExcluded && hasSummary && !isInReport;
@@ -66,7 +69,7 @@ function SceneChip({
   return (
     <div
       data-scene-chip-id={scene.id}
-      className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-xs transition-all ${
+      className={`rounded-lg border px-3 py-2 text-xs transition-all ${
         isExcluded
           ? "border-parchment-200 bg-parchment-50/50 text-parchment-400"
           : isHighlighted
@@ -78,82 +81,122 @@ function SceneChip({
             : "border-parchment-200 bg-white hover:border-parchment-400 text-parchment-700 hover:shadow-sm"
       }`}
     >
-      <div className="flex items-center gap-1.5 min-w-0 flex-1">
-        <Icon className={`h-3.5 w-3.5 flex-shrink-0 ${config.color}`} />
-        {isHighlighted && (
-          <span className="h-1.5 w-1.5 rounded-full bg-amber-500 flex-shrink-0" />
-        )}
-        <span className="font-medium flex-shrink-0">{scene.id}.</span>
-        {!isExcluded ? (
-          <button
-            onClick={() => onScrollToScene(scene.id)}
-            disabled={!isInReport}
-            className={`truncate text-left ${
-              isHighlighted
-                ? "font-semibold text-amber-900"
-                : isInReport
-                  ? "hover:underline"
-                  : "cursor-not-allowed text-parchment-400"
-            }`}
-            title={scene.title}
-          >
-            {scene.title}
-          </button>
-        ) : (
-          <span className="truncate" title={scene.title}>
-            {scene.title}
-          </span>
-        )}
+      <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5 min-w-0 flex-1">
+          <Icon className={`h-3.5 w-3.5 flex-shrink-0 ${config.color}`} />
+          {isHighlighted && (
+            <span className="h-1.5 w-1.5 rounded-full bg-amber-500 flex-shrink-0" />
+          )}
+          <span className="font-medium flex-shrink-0">{scene.id}.</span>
+          {!isExcluded ? (
+            <button
+              onClick={() => onScrollToScene(scene.id)}
+              disabled={!isInReport}
+              className={`truncate text-left ${
+                isHighlighted
+                  ? "font-semibold text-amber-900"
+                  : isInReport
+                    ? "hover:underline"
+                    : "cursor-not-allowed text-parchment-400"
+              }`}
+              title={scene.title}
+            >
+              {scene.title}
+            </button>
+          ) : (
+            <span className="truncate" title={scene.title}>
+              {scene.title}
+            </span>
+          )}
+        </div>
+
+        <div className="flex items-center gap-1 flex-shrink-0">
+          {isExcluded ? (
+            <>
+              <span className="text-[10px] text-parchment-400 italic">
+                {config.label}
+              </span>
+              {hasMaskedDetails && (
+                <button
+                  onClick={() => setShowMaskedDetails((prev) => !prev)}
+                  className="ml-1 p-1 rounded-md text-parchment-400 hover:text-parchment-600 hover:bg-parchment-100 transition-all"
+                  title={
+                    showMaskedDetails
+                      ? "Masquer le contenu de la scène"
+                      : "Afficher le contenu de la scène"
+                  }
+                >
+                  {showMaskedDetails ? (
+                    <EyeOff className="h-3.5 w-3.5" />
+                  ) : (
+                    <Eye className="h-3.5 w-3.5" />
+                  )}
+                </button>
+              )}
+            </>
+          ) : isMissing ? (
+            <>
+              <AlertTriangle className="h-3 w-3 text-amber-500" />
+              <span className="text-[10px] text-amber-600 font-medium">
+                Absente
+              </span>
+            </>
+          ) : isOutOfReport ? (
+            <>
+              <EyeOff className="h-3 w-3 text-parchment-400" />
+              <span className="text-[10px] text-parchment-500 font-medium">
+                Hors rapport
+              </span>
+            </>
+          ) : (
+            <Check className="h-3 w-3 text-green-500" />
+          )}
+
+          {!isExcluded && (
+            <button
+              onClick={() => onRegenerate(scene.id)}
+              disabled={isRegenerating}
+              className={`ml-1 p-1 rounded-md transition-all ${
+                isRegenerating
+                  ? "text-amber-500 cursor-wait"
+                  : isMissing
+                    ? "text-amber-600 hover:bg-amber-100"
+                    : "text-parchment-400 hover:text-parchment-600 hover:bg-parchment-100"
+              }`}
+              title={
+                isMissing
+                  ? "Générer cette scène"
+                  : "Regénérer cette scène"
+              }
+            >
+              {isRegenerating ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <RefreshCw className="h-3.5 w-3.5" />
+              )}
+            </button>
+          )}
+        </div>
       </div>
 
-      <div className="flex items-center gap-1 flex-shrink-0">
-        {isExcluded ? (
-          <span className="text-[10px] text-parchment-400 italic">
-            {config.label}
-          </span>
-        ) : isMissing ? (
-          <>
-            <AlertTriangle className="h-3 w-3 text-amber-500" />
-            <span className="text-[10px] text-amber-600 font-medium">
-              Absente
-            </span>
-          </>
-        ) : isOutOfReport ? (
-          <>
-            <EyeOff className="h-3 w-3 text-parchment-400" />
-            <span className="text-[10px] text-parchment-500 font-medium">
-              Hors rapport
-            </span>
-          </>
-        ) : (
-          <Check className="h-3 w-3 text-green-500" />
-        )}
-
-        {!isExcluded && (
-          <button
-            onClick={() => onRegenerate(scene.id)}
-            disabled={isRegenerating}
-            className={`ml-1 p-1 rounded-md transition-all ${
-              isRegenerating
-                ? "text-amber-500 cursor-wait"
-                : isMissing
-                  ? "text-amber-600 hover:bg-amber-100"
-                  : "text-parchment-400 hover:text-parchment-600 hover:bg-parchment-100"
-            }`}
-            title={
-              isMissing
-                ? "Générer cette scène"
-                : "Regénérer cette scène"
-            }
-          >
-            {isRegenerating ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <RefreshCw className="h-3.5 w-3.5" />
-            )}
-          </button>
-        )}
-      </div>
+      {isExcluded && showMaskedDetails && (
+        <div className="mt-2 rounded-md border border-parchment-200 bg-white/75 px-2.5 py-2 text-[11px] text-parchment-700 space-y-2">
+          {scene.analystSummary && (
+            <p className="italic">
+              {scene.analystSummary}
+            </p>
+          )}
+          {scene.transcriptExcerpt ? (
+            <pre className="max-h-48 overflow-y-auto whitespace-pre-wrap break-words font-mono leading-relaxed text-[10px] text-parchment-600">
+              {scene.transcriptExcerpt}
+            </pre>
+          ) : (
+            <p className="italic text-parchment-500">
+              Extrait de transcript indisponible pour cette scène.
+            </p>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -169,12 +212,17 @@ export default function SceneBar({
   activeSceneId,
 }: SceneBarProps) {
   const [expanded, setExpanded] = useState(true);
+  const [showMaskedScenes, setShowMaskedScenes] = useState(false);
   const chipsContainerRef = useRef<HTMLDivElement>(null);
 
   const renderedSet = useMemo(() => new Set(renderedSceneIds), [renderedSceneIds]);
   const narrativeScenes = scenes.filter(
     (s) => s.type !== "meta" && s.type !== "pause"
   );
+  const maskedScenes = scenes.filter(
+    (s) => s.type === "meta" || s.type === "pause"
+  );
+  const scenesToDisplay = showMaskedScenes ? scenes : narrativeScenes;
   const totalNarrative = narrativeScenes.length;
   const withSummary = narrativeScenes.filter((s) => s.summary).length;
   const missing = totalNarrative - withSummary;
@@ -212,7 +260,7 @@ export default function SceneBar({
         behavior: "smooth",
       });
     }
-  }, [activeSceneId, expanded]);
+  }, [activeSceneId, expanded, showMaskedScenes]);
 
   if (scenes.length === 0) return null;
 
@@ -242,6 +290,12 @@ export default function SceneBar({
                 {outOfReport} hors rapport
               </span>
             )}
+            {maskedScenes.length > 0 && (
+              <span className="inline-flex items-center gap-1 rounded-full bg-parchment-100 px-2 py-0.5 text-[10px] font-medium text-parchment-600">
+                <EyeOff className="h-2.5 w-2.5" />
+                {maskedScenes.length} masquée{maskedScenes.length > 1 ? "s" : ""}
+              </span>
+            )}
           </div>
         </div>
         {expanded ? (
@@ -256,7 +310,23 @@ export default function SceneBar({
           ref={chipsContainerRef}
           className="px-4 pb-3 space-y-1.5 max-h-72 overflow-y-auto lg:max-h-[calc(100vh-8.5rem)]"
         >
-          {scenes.map((scene) => (
+          {maskedScenes.length > 0 && (
+            <button
+              onClick={() => setShowMaskedScenes((prev) => !prev)}
+              className="w-full mb-1 flex items-center justify-center gap-2 rounded-lg border border-parchment-200 bg-parchment-50/60 px-3 py-2 text-xs font-medium text-parchment-700 hover:bg-parchment-100/70 transition-all"
+            >
+              {showMaskedScenes ? (
+                <EyeOff className="h-3.5 w-3.5" />
+              ) : (
+                <Eye className="h-3.5 w-3.5" />
+              )}
+              {showMaskedScenes
+                ? "Masquer les scènes méta/pause"
+                : `Afficher ${maskedScenes.length} scène${maskedScenes.length > 1 ? "s" : ""} masquée${maskedScenes.length > 1 ? "s" : ""}`}
+            </button>
+          )}
+
+          {scenesToDisplay.map((scene) => (
             <SceneChip
               key={scene.id}
               scene={scene}

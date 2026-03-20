@@ -42,6 +42,8 @@ type SceneMeta = {
   title: string;
   startLine: number;
   endLine: number;
+  location?: string;
+  summary?: string;
 };
 
 type UniverseConfig = {
@@ -1307,12 +1309,22 @@ app.get("/api/reports/:id/scenes", (req, res) => {
   const sceneSummaries = (workflowState?.sceneSummaries as Array<{ sceneId: number }>) || [];
 
   const summaryById = new Map(sceneSummaries.map((s) => [s.sceneId, s]));
+  const preprocessedTranscript = report.preprocessedTranscript || "";
 
   res.json({
-    scenes: scenes.map((scene) => ({
-      ...scene,
-      summary: summaryById.get(scene.id) || null,
-    })),
+    scenes: scenes.map((scene) => {
+      const isMetaScene = scene.type === "meta" || scene.type === "pause";
+      const transcriptExcerpt = isMetaScene && preprocessedTranscript
+        ? extractSceneText(preprocessedTranscript, scene.startLine, scene.endLine)
+        : null;
+
+      return {
+        ...scene,
+        analystSummary: scene.summary ?? null,
+        transcriptExcerpt,
+        summary: summaryById.get(scene.id) || null,
+      };
+    }),
   });
 });
 

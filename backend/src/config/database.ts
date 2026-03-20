@@ -4,7 +4,10 @@ import { resolve, join } from "path";
 import { fileURLToPath } from "url";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
-const dataDir = resolve(__dirname, "..", "data");
+// Keep a stable data path in both dev (src/*) and prod (dist/*).
+// database.ts lives in backend/src/config or backend/dist/config, so `../..` is backend/.
+const backendRootDir = resolve(__dirname, "..", "..");
+const dataDir = resolve(backendRootDir, "data");
 const dbPath = resolve(dataDir, "cr-session.sqlite");
 
 // Ensure data directory exists
@@ -394,7 +397,7 @@ export function listCorrections(reportId: string): CorrectionRow[] {
 // ── Migration from disk ──────────────────────────────────────────────────────
 
 export function migrateEditorDraftsFromDisk(): void {
-  const editorDraftsDir = resolve(__dirname, "..", "data", "editor-drafts");
+  const editorDraftsDir = resolve(dataDir, "editor-drafts");
   if (!existsSync(editorDraftsDir)) return;
 
   const existingCount = (
