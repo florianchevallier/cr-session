@@ -23,8 +23,10 @@ import type {
   ReportSummary,
   ReportDetail,
 } from "./lib/api";
+import packageJson from "../package.json";
 
 type AppStep = "config" | "processing" | "result";
+const APP_VERSION = packageJson.version;
 
 export default function App() {
   const [step, setStep] = useState<AppStep>("config");
@@ -262,6 +264,9 @@ export default function App() {
         </div>
         <p className="text-sm text-parchment-500">
           Transforme tes transcripts de JDR en comptes-rendus narratifs
+        </p>
+        <p className="mt-2 text-xs uppercase tracking-wide text-parchment-400">
+          v{APP_VERSION}
         </p>
       </header>
 
