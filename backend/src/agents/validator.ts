@@ -24,6 +24,8 @@ const MAX_RETRIES = 2;
 const VALIDATION_CONCURRENCY = 5;
 const ISSUE_PREVIEW_LIMIT = 3;
 const ISSUE_SUGGESTION_PREVIEW_MAX_LENGTH = 90;
+const VALIDATOR_INVOKE_MAX_ATTEMPTS = 3;
+const VALIDATOR_RETRY_BASE_DELAY_MS = 2000;
 
 const PerSceneIssueSchema = z.object({
   issue: z.string(),
@@ -83,6 +85,10 @@ function truncateForIssue(value: string, maxLength = 140): string {
   const compact = value.replace(/\s+/g, " ").trim();
   if (compact.length <= maxLength) return compact;
   return `${compact.slice(0, maxLength - 1)}…`;
+}
+
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function summarizeIssueSeverities(
@@ -242,39 +248,97 @@ export async function validatorNode(
           scene.endLine
         );
 
-        const perSceneValidation = await structuredModel.invoke([
-          new SystemMessage(systemPrompt),
-          new HumanMessage(
-            `Valide cette scène précisément. Tu as le contexte global, mais tu dois juger la fidélité du résumé par rapport au transcript de CETTE scène.\n\n` +
-              `## Scène ${scene.id}: ${scene.title}\n` +
-              `Type: ${scene.type} | Lieu: ${scene.location || "?"}\n` +
-              `Lignes: ${scene.startLine}-${scene.endLine}\n\n` +
-              `## Transcript source exact (subset)\n` +
-              `\`\`\`\n${sceneText}\n\`\`\`\n\n` +
-              `## Résumé produit pour cette scène\n` +
-              `Narrative:\n${summary.narrativeSummary}\n\n` +
-              `Key events:\n${summary.keyEvents.map((e) => `- ${e}`).join("\n")}\n\n` +
-              `Dice rolls:\n${summary.diceRolls.map((d) => `- ${d.character} | ${d.skill} | ${d.result} | ${d.context}`).join("\n")}\n\n` +
-              `NPCs:\n${summary.npcsInvolved.map((n) => `- ${n}`).join("\n")}\n\n` +
-              `Technical notes:\n${(summary.technicalNotes || []).map((n) => `- ${n}`).join("\n")}\n\n` +
-              `## Ce que tu dois vérifier\n` +
-              `1. Fidélité stricte au transcript (pas d'invention)\n` +
-              `2. Omissions majeures (événements, dialogues clés, jets de dés)\n` +
-              `3. Cohérence des noms/personnages/PNJs\n` +
-              `4. Cohérence mécanique (jets, conséquences)\n` +
-              `5. Clarté et complétude narrative\n` +
-              `6. Chronologie stricte: le résumé suit l'ordre réel des événements dans cette scène\n` +
-              `7. ⚠️ ATTRIBUTION DES ACTIONS (CRITIQUE): Pour CHAQUE action majeure mentionnée dans le résumé:\n` +
-              `   - Identifie dans le transcript source QUEL speaker/personnage réalise cette action\n` +
-              `   - Vérifie que le résumé attribue l'action au BON personnage\n` +
-              `   - Si l'attribution est incorrecte, c'est une "error"\n` +
-              `   - Vérifie aussi: qui parle, qui décide, qui agit, qui subit, qui lance les dés\n` +
-              `   - Les jets de dés doivent être attribués au personnage qui lance, pas à la cible\n` +
-              `8. Interdiction de fusion d'identité (ex: combinaison de 2 personnages dans un nom hybride)\n` +
-              `9. Traçabilité: les keyEvents pointent vers des lignes plausibles [Lx] ou [Lx-Ly]\n\n` +
-              `Retourne uniquement le JSON structuré demandé.`
-          ),
-        ]);
+        const perScenePrompt =
+          `Valide cette scène précisément. Tu as le contexte global, mais tu dois juger la fidélité du résumé par rapport au transcript de CETTE scène.\n\n` +
+          `## Scène ${scene.id}: ${scene.title}\n` +
+          `Type: ${scene.type} | Lieu: ${scene.location || "?"}\n` +
+          `Lignes: ${scene.startLine}-${scene.endLine}\n\n` +
+          `## Transcript source exact (subset)\n` +
+          `\`\`\`\n${sceneText}\n\`\`\`\n\n` +
+          `## Résumé produit pour cette scène\n` +
+          `Narrative:\n${summary.narrativeSummary}\n\n` +
+          `Key events:\n${summary.keyEvents.map((e) => `- ${e}`).join("\n")}\n\n` +
+          `Dice rolls:\n${summary.diceRolls.map((d) => `- ${d.character} | ${d.skill} | ${d.result} | ${d.context}`).join("\n")}\n\n` +
+          `NPCs:\n${summary.npcsInvolved.map((n) => `- ${n}`).join("\n")}\n\n` +
+          `Technical notes:\n${(summary.technicalNotes || []).map((n) => `- ${n}`).join("\n")}\n\n` +
+          `## Ce que tu dois vérifier\n` +
+          `1. Fidélité stricte au transcript (pas d'invention)\n` +
+          `2. Omissions majeures (événements, dialogues clés, jets de dés)\n` +
+          `3. Cohérence des noms/personnages/PNJs\n` +
+          `4. Cohérence mécanique (jets, conséquences)\n` +
+          `5. Clarté et complétude narrative\n` +
+          `6. Chronologie stricte: le résumé suit l'ordre réel des événements dans cette scène\n` +
+          `7. ⚠️ ATTRIBUTION DES ACTIONS (CRITIQUE): Pour CHAQUE action majeure mentionnée dans le résumé:\n` +
+          `   - Identifie dans le transcript source QUEL speaker/personnage réalise cette action\n` +
+          `   - Vérifie que le résumé attribue l'action au BON personnage\n` +
+          `   - Si l'attribution est incorrecte, c'est une "error"\n` +
+          `   - Vérifie aussi: qui parle, qui décide, qui agit, qui subit, qui lance les dés\n` +
+          `   - Les jets de dés doivent être attribués au personnage qui lance, pas à la cible\n` +
+          `8. Interdiction de fusion d'identité (ex: combinaison de 2 personnages dans un nom hybride)\n` +
+          `9. Traçabilité: les keyEvents pointent vers des lignes plausibles [Lx] ou [Lx-Ly]\n` +
+          `10. Limite-toi à 12 issues maximum, en priorisant error > warning > info\n\n` +
+          `Retourne uniquement le JSON structuré demandé.`;
+
+        const llmIssues: z.infer<typeof PerSceneIssueSchema>[] = [];
+        let llmInvokeFailed = false;
+        let lastInvokeError: unknown;
+
+        for (let attempt = 1; attempt <= VALIDATOR_INVOKE_MAX_ATTEMPTS; attempt++) {
+          try {
+            log("Validator scène: invoke", {
+              phase,
+              retryCount: state.retryCount,
+              sceneId: scene.id,
+              attempt,
+              maxAttempts: VALIDATOR_INVOKE_MAX_ATTEMPTS,
+            });
+            const perSceneValidation = await structuredModel.invoke([
+              new SystemMessage(systemPrompt),
+              new HumanMessage(perScenePrompt),
+            ]);
+            llmIssues.push(...perSceneValidation.issues);
+            log("Validator scène: invoke réussi", {
+              phase,
+              retryCount: state.retryCount,
+              sceneId: scene.id,
+              attempt,
+              llmIssuesCount: perSceneValidation.issues.length,
+            });
+            lastInvokeError = undefined;
+            break;
+          } catch (error) {
+            lastInvokeError = error;
+            log("Validator scène: invoke error", {
+              phase,
+              retryCount: state.retryCount,
+              sceneId: scene.id,
+              attempt,
+              maxAttempts: VALIDATOR_INVOKE_MAX_ATTEMPTS,
+              error: getErrorMessage(error),
+            });
+            if (attempt < VALIDATOR_INVOKE_MAX_ATTEMPTS) {
+              const delayMs = VALIDATOR_RETRY_BASE_DELAY_MS * attempt;
+              log("Validator scène: retry planifié", {
+                phase,
+                retryCount: state.retryCount,
+                sceneId: scene.id,
+                nextAttempt: attempt + 1,
+                delayMs,
+              });
+              await new Promise((resolve) => setTimeout(resolve, delayMs));
+            }
+          }
+        }
+
+        if (lastInvokeError) {
+          llmInvokeFailed = true;
+          llmIssues.push({
+            issue: `Validation LLM indisponible pour cette scène: ${truncateForIssue(getErrorMessage(lastInvokeError), 180)}`,
+            severity: "warning",
+            suggestion:
+              "Relancer la validation de cette scène; le résumé est conservé mais n'a pas pu être vérifié par le validateur LLM.",
+          });
+        }
 
         const summaryTextForChecks = [
           summary.narrativeSummary,
@@ -325,7 +389,7 @@ export async function validatorNode(
           return [];
         });
         const sceneIssues = [
-          ...perSceneValidation.issues,
+          ...llmIssues,
           ...ruleBasedIssues,
           ...gmIssues,
         ];
@@ -336,7 +400,8 @@ export async function validatorNode(
           sceneId: scene.id,
           issuesCount: sceneIssues.length,
           ...summarizeIssueSeverities(sceneIssues),
-          llmIssuesCount: perSceneValidation.issues.length,
+          llmIssuesCount: llmIssues.length,
+          llmInvokeFailed,
           mergedNamesIssuesCount: ruleBasedIssues.length,
           gmAttributionIssuesCount: gmIssues.length,
           keyEventLineIssuesCount: keyEventLineIssues.length,
