@@ -185,10 +185,33 @@ export default function SceneBar({
   useEffect(() => {
     if (!chipsContainerRef.current || activeSceneId === null || !expanded) return;
 
-    const activeChip = chipsContainerRef.current.querySelector<HTMLElement>(
+    const chipsContainer = chipsContainerRef.current;
+    const activeChip = chipsContainer.querySelector<HTMLElement>(
       `[data-scene-chip-id="${activeSceneId}"]`
     );
-    activeChip?.scrollIntoView({ block: "nearest" });
+
+    if (!activeChip) return;
+
+    // Keep the active chip visible without scrolling the whole page on mobile.
+    const chipTop = activeChip.offsetTop;
+    const chipBottom = chipTop + activeChip.offsetHeight;
+    const viewportTop = chipsContainer.scrollTop;
+    const viewportBottom = viewportTop + chipsContainer.clientHeight;
+
+    if (chipTop < viewportTop) {
+      chipsContainer.scrollTo({
+        top: Math.max(0, chipTop - 8),
+        behavior: "smooth",
+      });
+      return;
+    }
+
+    if (chipBottom > viewportBottom) {
+      chipsContainer.scrollTo({
+        top: chipBottom - chipsContainer.clientHeight + 8,
+        behavior: "smooth",
+      });
+    }
   }, [activeSceneId, expanded]);
 
   if (scenes.length === 0) return null;
