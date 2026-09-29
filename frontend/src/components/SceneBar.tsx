@@ -103,19 +103,21 @@ function SceneRow({
             <span className={`w-5 shrink-0 text-right tabular-nums ${isActive ? "text-accent-ink" : "text-ink-muted"}`}>
               {scene.id}
             </span>
-            <span className={`line-clamp-2 py-2 leading-snug ${isActive ? "font-semibold text-ink" : isInReport ? "text-ink" : "text-ink-muted"}`}>
-              {scene.title}
-            </span>
-            {status && (
-              <span
-                className={`ml-auto inline-flex shrink-0 items-center gap-1 text-xs font-medium ${
-                  isMissing ? "text-warn" : "text-ink-muted"
-                }`}
-              >
-                {isMissing && <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />}
-                {status}
+            <span className="flex min-w-0 flex-1 flex-col py-2">
+              <span className={`line-clamp-2 leading-snug ${isActive ? "font-semibold text-ink" : isInReport ? "text-ink" : "text-ink-muted"}`}>
+                {scene.title}
               </span>
-            )}
+              {status && (
+                <span
+                  className={`mt-0.5 inline-flex items-center gap-1 text-xs font-medium ${
+                    isMissing ? "text-warn" : "text-ink-muted"
+                  }`}
+                >
+                  {isMissing && <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />}
+                  {status}
+                </span>
+              )}
+            </span>
           </button>
         )}
 

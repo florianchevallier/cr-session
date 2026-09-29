@@ -687,7 +687,7 @@ export default function ReportViewer({
       h2: ({ children, ...props }) => {
         renderState.suppress = false;
 
-        const headingText = getTextContent(children).trim();
+        const headingText = getTextContent(children).trim().replace(/^Chapitre \d+\s*:\s*/, "");
         const scene = narrativeScenes.find((s) => s.title === headingText);
 
         if (!scene) {
