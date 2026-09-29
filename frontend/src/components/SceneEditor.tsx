@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { Save, X, Loader2 } from "lucide-react";
+import { SHORTCUT_KEY } from "../lib/format";
 
 interface SceneEditorProps {
   sceneId: number;
@@ -18,6 +19,7 @@ export default function SceneEditor({
 }: SceneEditorProps) {
   const [editedContent, setEditedContent] = useState(content);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const unchanged = editedContent.trim() === content.trim();
 
   useEffect(() => {
     if (textareaRef.current) {
@@ -32,7 +34,7 @@ export default function SceneEditor({
   };
 
   const handleSave = async () => {
-    if (editedContent.trim() === content.trim()) {
+    if (unchanged) {
       onCancel();
       return;
     }
@@ -56,43 +58,44 @@ export default function SceneEditor({
   };
 
   return (
-    <div className="rounded-xl border-2 border-amber-300 bg-amber-50/30 p-4 my-4 animate-fade-in">
+    <div className="my-6 rounded-xl border border-accent/40 bg-accent-soft/50 p-3 font-sans animate-fade-in sm:p-4">
+      <label htmlFor={`scene-editor-${sceneId}`} className="sr-only">
+        Texte de la scène {sceneId}
+      </label>
       <textarea
+        id={`scene-editor-${sceneId}`}
         ref={textareaRef}
         value={editedContent}
         onChange={handleTextareaChange}
         onKeyDown={handleKeyDown}
-        className="w-full rounded-lg border border-amber-300 bg-white/90 px-3 py-2.5 text-sm text-parchment-800 focus:border-amber-500 focus:outline-none focus:ring-2 focus:ring-amber-300/50 resize-none font-serif leading-relaxed"
+        className="textarea resize-none border-line-field bg-surface font-serif text-lg leading-relaxed sm:text-lg"
         rows={10}
         disabled={isSaving}
       />
 
-      <div className="mt-3 flex items-center justify-between">
-        <p className="text-[11px] text-amber-600">
-          {navigator.platform.includes("Mac") ? "⌘" : "Ctrl"}+Entrée pour
-          sauvegarder · Échap pour annuler
-          {isSaving && " · Mise à jour des métadonnées en cours..."}
+      <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <p className="text-sm text-ink-muted" aria-live="polite">
+          {isSaving
+            ? "Enregistrement et mise à jour des métadonnées…"
+            : `${SHORTCUT_KEY}+Entrée pour enregistrer · Échap pour annuler`}
         </p>
         <div className="flex gap-2">
-          <button
-            onClick={handleCancel}
-            disabled={isSaving}
-            className="btn-secondary text-xs py-1"
-          >
-            <X className="h-3.5 w-3.5" />
+          <button type="button" onClick={handleCancel} disabled={isSaving} className="btn-secondary btn-sm">
+            <X className="h-4 w-4" aria-hidden="true" />
             Annuler
           </button>
           <button
-            onClick={handleSave}
-            disabled={isSaving || editedContent.trim() === content.trim()}
-            className="btn-primary text-xs py-1"
+            type="button"
+            onClick={() => void handleSave()}
+            disabled={isSaving || unchanged}
+            className="btn-primary btn-sm"
           >
             {isSaving ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
             ) : (
-              <Save className="h-3.5 w-3.5" />
+              <Save className="h-4 w-4" aria-hidden="true" />
             )}
-            Sauvegarder
+            Enregistrer
           </button>
         </div>
       </div>

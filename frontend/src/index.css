@@ -2,127 +2,359 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ── Design tokens ──────────────────────────────────────────────────────────
+   Channels only (r g b) so Tailwind can apply alpha: bg-accent/10.
+   Every text token is ≥ 4.5:1 on paper, surface, sunken and accent-soft.
+   line-field is ≥ 3:1 on paper/surface (form control boundaries). */
+
+:root {
+  --paper: 246 239 226;
+  --surface: 255 252 246;
+  --sunken: 240 230 212;
+
+  --ink: 42 32 22;
+  --ink-muted: 92 74 51;
+  --ink-subtle: 110 90 62;
+
+  --line: 228 214 189;
+  --line-strong: 205 184 143;
+  --line-field: 154 124 76;
+
+  --accent: 124 79 25;
+  --accent-hover: 96 60 16;
+  --accent-soft: 242 226 196;
+  --accent-ink: 124 79 25;
+  --on-accent: 255 252 246;
+
+  --ok: 61 106 44;
+  --ok-soft: 230 238 217;
+  --warn: 138 82 0;
+  --warn-soft: 248 231 198;
+  --danger: 158 47 28;
+  --danger-soft: 247 221 213;
+
+  --scene-narrative: 59 88 120;
+  --scene-combat: 158 47 28;
+  --scene-social: 122 61 108;
+  --scene-exploration: 68 103 43;
+
+  --shadow: 60 40 15;
+  --highlight: 226 170 70;
+
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: 21 17 12;
+    --surface: 31 25 18;
+    --sunken: 25 20 16;
+
+    --ink: 242 232 214;
+    --ink-muted: 207 190 159;
+    --ink-subtle: 173 154 125;
+
+    --line: 51 41 29;
+    --line-strong: 77 63 45;
+    --line-field: 127 106 75;
+
+    --accent: 220 166 90;
+    --accent-hover: 232 186 118;
+    --accent-soft: 58 42 22;
+    --accent-ink: 227 178 108;
+    --on-accent: 27 18 9;
+
+    --ok: 159 197 132;
+    --ok-soft: 34 48 26;
+    --warn: 230 168 79;
+    --warn-soft: 58 41 18;
+    --danger: 238 142 120;
+    --danger-soft: 61 30 23;
+
+    --scene-narrative: 159 184 218;
+    --scene-combat: 238 142 120;
+    --scene-social: 214 160 200;
+    --scene-exploration: 171 203 140;
+
+    --shadow: 0 0 0;
+    --highlight: 190 130 40;
+
+    color-scheme: dark;
+  }
+}
+
 @layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+    scroll-padding-top: 1.5rem;
+  }
+
   body {
-    @apply min-h-screen bg-gradient-to-br from-parchment-50 via-white to-parchment-100;
-    font-family: "Inter", system-ui, -apple-system, sans-serif;
+    @apply min-h-screen bg-paper font-sans text-base text-ink antialiased;
+  }
+
+  ::selection {
+    background-color: rgb(var(--highlight) / 0.35);
+  }
+
+  /* One focus indicator for every control, visible on every surface. */
+  :focus-visible {
+    outline: 2px solid rgb(var(--accent));
+    outline-offset: 2px;
+  }
+
+  button:disabled,
+  [aria-disabled="true"] {
+    cursor: not-allowed;
+  }
+
+  h1,
+  h2,
+  h3 {
+    text-wrap: balance;
   }
 }
 
 @layer components {
   .card {
-    @apply rounded-xl border border-parchment-200 bg-white/80 backdrop-blur-sm shadow-sm;
+    @apply rounded-xl border border-line bg-surface shadow-card;
+  }
+
+  .section-title {
+    @apply text-base font-semibold text-ink;
+  }
+
+  /* Buttons */
+  .btn {
+    @apply inline-flex min-h-[2.5rem] items-center justify-center gap-2 rounded-lg px-4 text-sm font-medium
+           transition-colors duration-150 disabled:cursor-not-allowed disabled:opacity-60;
+  }
+
+  .btn-sm {
+    @apply min-h-[2.25rem] px-3 text-sm;
+  }
+
+  .btn-lg {
+    @apply min-h-[3rem] px-6 text-base font-semibold;
   }
 
   .btn-primary {
-    @apply inline-flex items-center gap-2 rounded-lg bg-parchment-700 px-6 py-3 text-sm font-semibold text-white
-           shadow-md transition-all hover:bg-parchment-800 hover:shadow-lg
-           disabled:cursor-not-allowed disabled:opacity-50;
+    @apply btn bg-accent text-accent-on shadow-card hover:bg-accent-hover;
+  }
+
+  /* Disabled primary: a clearly inert surface rather than a faded accent. */
+  .btn-primary:disabled {
+    @apply border border-line-strong bg-sunken text-ink-muted opacity-100 shadow-none hover:bg-sunken;
   }
 
   .btn-secondary {
-    @apply inline-flex items-center gap-2 rounded-lg border border-parchment-300 bg-white px-4 py-2 text-sm
-           font-medium text-parchment-800 transition-all hover:bg-parchment-50;
+    @apply btn border border-line-strong bg-surface text-ink hover:border-line-field hover:bg-sunken;
   }
 
+  .btn-ghost {
+    @apply btn text-ink-muted hover:bg-sunken hover:text-ink;
+  }
+
+  .btn-danger {
+    @apply btn text-danger hover:bg-danger-soft;
+  }
+
+  .icon-btn {
+    @apply inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-ink-muted
+           transition-colors duration-150 hover:bg-sunken hover:text-ink disabled:opacity-50;
+  }
+
+  .icon-btn-danger {
+    @apply icon-btn hover:bg-danger-soft hover:text-danger;
+  }
+
+  /* Form fields */
   .input {
-    @apply w-full rounded-lg border border-parchment-200 bg-white px-4 py-2.5 text-sm
-           outline-none transition-all placeholder:text-parchment-400
-           focus:border-parchment-500 focus:ring-2 focus:ring-parchment-200;
+    @apply block w-full min-h-[2.75rem] rounded-lg border border-line-field bg-surface px-3.5 py-2 text-base text-ink
+           transition-colors duration-150 placeholder:text-ink-subtle hover:border-ink-subtle
+           focus-visible:border-accent sm:text-sm;
   }
 
   .textarea {
-    @apply input resize-y;
+    @apply input min-h-[6rem] resize-y leading-relaxed;
   }
 
   .label {
-    @apply mb-1.5 block text-sm font-medium text-parchment-800;
+    @apply mb-1.5 block text-sm font-medium text-ink;
+  }
+
+  .hint {
+    @apply text-sm text-ink-muted;
+  }
+
+  .chip {
+    @apply inline-flex items-center gap-1 rounded-full bg-sunken px-2.5 py-0.5 text-xs font-medium text-ink-muted;
   }
 }
 
-/* Markdown styles for the report viewer */
+/* ── Report typography: the chronicle ─────────────────────────────────────── */
+
 .prose-report {
-  @apply max-w-none leading-relaxed text-gray-800;
+  @apply font-serif text-ink;
+  font-size: 1.0625rem;
+  line-height: 1.65;
+}
+
+.prose-report > * {
+  @apply mx-auto;
+  max-width: 42rem; /* ≈ 70 characters of body text */
 }
 
 .prose-report h1 {
-  @apply text-3xl font-bold text-parchment-900 border-b-2 border-parchment-300 pb-3 mb-6;
+  @apply font-sans text-2xl font-semibold;
 }
 
 .prose-report h2 {
-  @apply text-2xl font-bold text-parchment-800 mt-10 mb-4;
+  @apply mt-12 mb-3 font-sans text-xl font-semibold text-ink;
+  scroll-margin-top: 1.5rem;
+}
+
+.prose-report h2:first-child {
+  @apply mt-0;
 }
 
 .prose-report h3 {
-  @apply text-lg font-semibold text-parchment-700 mt-6 mb-2;
+  @apply mt-8 mb-2 font-sans text-lg font-semibold text-ink;
 }
 
 .prose-report p {
-  @apply mb-4 leading-7;
+  @apply mb-5;
 }
 
-.prose-report blockquote {
-  @apply border-l-4 border-parchment-400 bg-parchment-50 py-2 px-4 rounded-r-lg text-sm my-4;
-}
-
-.prose-report ul, .prose-report ol {
-  @apply mb-4 pl-6;
-}
-
-.prose-report li {
-  @apply mb-1;
-}
-
-.prose-report ul li {
-  @apply list-disc;
-}
-
-.prose-report ol li {
-  @apply list-decimal;
-}
-
-.prose-report table {
-  @apply w-full border-collapse my-4;
-}
-
-.prose-report th {
-  @apply bg-parchment-100 px-4 py-2 text-left text-sm font-semibold text-parchment-800 border border-parchment-200;
-}
-
-.prose-report td {
-  @apply px-4 py-2 text-sm border border-parchment-200;
-}
-
-.prose-report hr {
-  @apply border-parchment-300 my-8;
+.prose-report a {
+  @apply text-accent-ink underline decoration-1 underline-offset-2;
 }
 
 .prose-report strong {
-  @apply font-semibold text-parchment-900;
+  @apply font-semibold text-ink;
 }
 
 .prose-report em {
-  @apply italic text-parchment-700;
+  @apply italic;
+}
+
+.prose-report ul,
+.prose-report ol {
+  @apply mb-5 pl-6;
+}
+
+.prose-report li {
+  @apply mb-1.5 pl-1;
+}
+
+.prose-report ul > li {
+  @apply list-disc;
+}
+
+.prose-report ol > li {
+  @apply list-decimal;
+}
+
+.prose-report li::marker {
+  color: rgb(var(--accent-ink));
+}
+
+/* Technical boxes (dice, NPCs, notes): a margin note, not the story. */
+.prose-report blockquote {
+  @apply my-6 rounded-lg border border-line bg-sunken px-4 py-3 font-sans text-sm leading-relaxed text-ink-muted;
+  border-left: 3px solid rgb(var(--line-strong));
+}
+
+.prose-report blockquote p {
+  @apply mb-3;
+}
+
+.prose-report blockquote p:last-child,
+.prose-report blockquote ul:last-child {
+  @apply mb-0;
+}
+
+.prose-report blockquote strong {
+  @apply text-ink;
+}
+
+.prose-report blockquote ul {
+  @apply mb-4 pl-5;
+}
+
+.prose-report blockquote li {
+  @apply mb-1;
+}
+
+.prose-report blockquote em {
+  @apply text-ink-muted;
+}
+
+.prose-report .box-label {
+  @apply inline-flex items-center gap-1.5 font-semibold text-ink;
+}
+
+.prose-report .box-label svg {
+  @apply h-4 w-4 text-accent-ink;
+}
+
+.prose-report .scene-location {
+  @apply -mt-1 mb-6 flex items-center gap-1.5 font-sans text-sm font-medium not-italic text-ink-muted;
+}
+
+.prose-report table {
+  @apply my-6 w-full border-collapse font-sans text-sm;
+}
+
+.prose-report th {
+  @apply border-b border-line-strong px-3 py-2 text-left text-xs font-semibold uppercase tracking-[0.08em] text-ink-muted;
+}
+
+.prose-report td {
+  @apply border-b border-line px-3 py-2.5;
+}
+
+.prose-report tr:last-child td {
+  @apply border-b-0;
 }
 
 .prose-report code {
-  @apply bg-parchment-100 rounded px-1.5 py-0.5 text-sm font-mono;
+  @apply rounded bg-sunken px-1.5 py-0.5 font-mono text-[0.85em];
 }
 
-/* ── Correction feature styles ─────────────────────────────────────────────── */
+.prose-report hr {
+  @apply my-10 border-line;
+}
 
-/* CSS Highlight API: highlight selected text while correction panel is open */
+/* Scene heading actions: visible on hover, keyboard focus, and always on touch. */
+.scene-heading-action {
+  opacity: 0;
+  transition: opacity 150ms ease-out;
+}
+
+.scene-heading:hover .scene-heading-action,
+.scene-heading-action:focus-visible {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .scene-heading-action {
+    opacity: 1;
+  }
+}
+
+/* ── Correction feature ───────────────────────────────────────────────────── */
+
 ::highlight(correction-target) {
-  background-color: rgba(251, 191, 36, 0.35);
+  background-color: rgb(var(--highlight) / 0.35);
   color: inherit;
 }
 
-/* Floating correction button with arrow pointer */
 .correction-button-container {
   display: flex;
   flex-direction: column;
   align-items: center;
-  animation: correction-button-in 150ms ease-out;
+  animation: rise-in 150ms ease-out;
 }
 
 .correction-button-arrow {
@@ -130,10 +362,12 @@
   height: 0;
   border-left: 6px solid transparent;
   border-right: 6px solid transparent;
-  border-bottom: 6px solid #d97706; /* amber-600 */
+  border-bottom: 6px solid rgb(var(--accent));
 }
 
-@keyframes correction-button-in {
+/* ── Motion ───────────────────────────────────────────────────────────────── */
+
+@keyframes rise-in {
   from {
     opacity: 0;
     transform: translateY(4px);
@@ -144,7 +378,6 @@
   }
 }
 
-/* Modal animations */
 @keyframes fade-in {
   from {
     opacity: 0;
@@ -157,22 +390,11 @@
 @keyframes scale-in {
   from {
     opacity: 0;
-    transform: scale(0.95);
+    transform: scale(0.97);
   }
   to {
     opacity: 1;
     transform: scale(1);
-  }
-}
-
-@keyframes slide-in {
-  from {
-    opacity: 0;
-    transform: translateX(100%);
-  }
-  to {
-    opacity: 1;
-    transform: translateX(0);
   }
 }
 
@@ -181,27 +403,19 @@
 }
 
 .animate-scale-in {
-  animation: scale-in 200ms ease-out;
+  animation: scale-in 180ms ease-out;
 }
 
-.animate-slide-in {
-  animation: slide-in 300ms ease-out;
+.animate-rise-in {
+  animation: rise-in 200ms ease-out;
 }
-
-/* ── Scene heading edit button ──────────────────────────────────────────── */
-
-.prose-report h2.group\/heading {
-  @apply flex items-center justify-between gap-3;
-}
-
-/* ── Scene scroll highlight flash ──────────────────────────────────────── */
 
 @keyframes heading-flash {
   0% {
     background-color: transparent;
   }
   15% {
-    background-color: rgba(217, 119, 6, 0.15);
+    background-color: rgb(var(--highlight) / 0.22);
   }
   100% {
     background-color: transparent;
@@ -209,8 +423,17 @@
 }
 
 .highlight-flash {
-  animation: heading-flash 2s ease-out;
-  border-radius: 4px;
-  padding-left: 8px;
-  margin-left: -8px;
+  animation: heading-flash 1.6s ease-out;
+  border-radius: 6px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

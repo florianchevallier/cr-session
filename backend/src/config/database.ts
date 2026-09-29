@@ -1,13 +1,15 @@
 import Database, { type Database as DatabaseType } from "better-sqlite3";
-import { existsSync, mkdirSync, readFileSync, readdirSync } from "fs";
-import { resolve, join } from "path";
+import { existsSync, mkdirSync } from "fs";
+import { resolve } from "path";
+import type { PlayerDraft } from "../report/types.js";
 import { fileURLToPath } from "url";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 // Keep a stable data path in both dev (src/*) and prod (dist/*).
 // database.ts lives in backend/src/config or backend/dist/config, so `../..` is backend/.
 const backendRootDir = resolve(__dirname, "..", "..");
-const dataDir = resolve(backendRootDir, "data");
+// CR_DATA_DIR permet de pointer vers une autre base (ex. copie de prod pour un test).
+export const dataDir = process.env.CR_DATA_DIR ? resolve(process.env.CR_DATA_DIR) : resolve(backendRootDir, "data");
 const dbPath = resolve(dataDir, "cr-session.sqlite");
 
 // Ensure data directory exists
@@ -87,6 +89,26 @@ function runMigrations(): void {
         ALTER TABLE reports ADD COLUMN session_history TEXT;
       `,
     },
+    {
+      name: "004_voiceprints",
+      sql: `
+        CREATE TABLE IF NOT EXISTS voiceprints (
+          id TEXT PRIMARY KEY,
+          universe_id TEXT NOT NULL,
+          person_name TEXT NOT NULL,
+          clip_path TEXT NOT NULL,
+          duration_sec REAL,
+          source TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_voiceprints_universe ON voiceprints(universe_id);
+      `,
+    },
+    {
+      // Échantillons proposés automatiquement : « pending » tant que l'utilisateur ne les a pas validés.
+      name: "005_voiceprint_status",
+      sql: `ALTER TABLE voiceprints ADD COLUMN status TEXT NOT NULL DEFAULT 'confirmed';`,
+    },
   ];
 
   const insertMigration = db.prepare(
@@ -110,11 +132,7 @@ runMigrations();
 export interface EditorDraftRow {
   universeContext: string;
   sessionHistory: string;
-  defaultPlayers?: Array<{
-    playerName: string;
-    characterName: string;
-    speakerHint?: string;
-  }>;
+  defaultPlayers?: PlayerDraft[];
 }
 
 export function getEditorDraft(universeId: string): EditorDraftRow | null {
@@ -166,6 +184,13 @@ export function upsertEditorDraft(
   ).run(universeId, draft.universeContext, draft.sessionHistory, playersJson);
 }
 
+export function deleteEditorDraft(universeId: string): boolean {
+  const result = db
+    .prepare("DELETE FROM editor_drafts WHERE universe_id = ?")
+    .run(universeId);
+  return result.changes > 0;
+}
+
 // ── Reports ──────────────────────────────────────────────────────────────────
 
 export interface ReportRow {
@@ -174,7 +199,7 @@ export interface ReportRow {
   reportMd: string;
   universeName: string;
   transcriptName: string;
-  players: Array<{ playerName: string; characterName: string; speakerHint?: string }>;
+  players: PlayerDraft[];
   workflowState: Record<string, unknown> | null;
   rawTranscript: string | null;
   preprocessedTranscript: string | null;
@@ -189,7 +214,7 @@ export interface ReportSummaryRow {
   jobId: string | null;
   universeName: string;
   transcriptName: string;
-  players: Array<{ playerName: string; characterName: string; speakerHint?: string }>;
+  players: PlayerDraft[];
   createdAt: string;
   updatedAt: string;
 }
@@ -200,7 +225,7 @@ export function insertReport(report: {
   reportMd: string;
   universeName: string;
   transcriptName: string;
-  players: Array<{ playerName: string; characterName: string; speakerHint?: string }>;
+  players: PlayerDraft[];
   workflowState?: Record<string, unknown> | null;
   rawTranscript?: string | null;
   preprocessedTranscript?: string | null;
@@ -394,53 +419,75 @@ export function listCorrections(reportId: string): CorrectionRow[] {
   }));
 }
 
-// ── Migration from disk ──────────────────────────────────────────────────────
+// ── Voiceprints (échantillons de voix des joueurs et du MJ) ──────────────────
 
-export function migrateEditorDraftsFromDisk(): void {
-  const editorDraftsDir = resolve(dataDir, "editor-drafts");
-  if (!existsSync(editorDraftsDir)) return;
-
-  const existingCount = (
-    db.prepare("SELECT COUNT(*) as count FROM editor_drafts").get() as {
-      count: number;
-    }
-  ).count;
-  if (existingCount > 0) return; // already migrated
-
-  try {
-    const files = readdirSync(editorDraftsDir).filter((f) =>
-      f.endsWith(".json")
-    );
-    for (const file of files) {
-      const universeId = file.replace(".json", "");
-      const content = readFileSync(join(editorDraftsDir, file), "utf-8");
-      try {
-        const data = JSON.parse(content);
-        upsertEditorDraft(universeId, {
-          universeContext:
-            typeof data.universeContext === "string"
-              ? data.universeContext
-              : "",
-          sessionHistory:
-            typeof data.sessionHistory === "string"
-              ? data.sessionHistory
-              : "",
-          defaultPlayers: Array.isArray(data.defaultPlayers)
-            ? data.defaultPlayers
-            : undefined,
-        });
-      } catch {
-        // skip invalid file
-      }
-    }
-    if (files.length > 0) {
-      console.log(
-        `[db] Migrated ${files.length} editor draft(s) from disk to SQLite`
-      );
-    }
-  } catch {
-    // ignore migration errors
-  }
+export interface VoiceprintRow {
+  id: string;
+  universeId: string;
+  personName: string;
+  clipPath: string;
+  durationSec: number | null;
+  source: string | null;
+  /** confirmed = validé par l'utilisateur (utilisé par l'analyse), pending = proposé, à vérifier. */
+  status: VoiceprintStatus;
+  createdAt: string;
 }
 
-export default db;
+export type VoiceprintStatus = "confirmed" | "pending";
+
+type VoiceprintDbRow = {
+  id: string;
+  universe_id: string;
+  person_name: string;
+  clip_path: string;
+  duration_sec: number | null;
+  source: string | null;
+  status: string;
+  created_at: string;
+};
+
+const toVoiceprint = (r: VoiceprintDbRow): VoiceprintRow => ({
+  id: r.id,
+  universeId: r.universe_id,
+  personName: r.person_name,
+  clipPath: r.clip_path,
+  durationSec: r.duration_sec,
+  source: r.source,
+  status: r.status === "pending" ? "pending" : "confirmed",
+  createdAt: r.created_at,
+});
+
+export function insertVoiceprint(v: Omit<VoiceprintRow, "createdAt" | "status"> & { status?: VoiceprintStatus }): void {
+  db.prepare(
+    `INSERT INTO voiceprints (id, universe_id, person_name, clip_path, duration_sec, source, status)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
+  ).run(v.id, v.universeId, v.personName, v.clipPath, v.durationSec, v.source, v.status ?? "confirmed");
+}
+
+export function updateVoiceprint(id: string, patch: { status?: VoiceprintStatus; personName?: string }): boolean {
+  const current = getVoiceprint(id);
+  if (!current) return false;
+  db.prepare("UPDATE voiceprints SET status = ?, person_name = ? WHERE id = ?").run(
+    patch.status ?? current.status,
+    patch.personName?.trim() || current.personName,
+    id
+  );
+  return true;
+}
+
+export function listVoiceprints(universeId: string): VoiceprintRow[] {
+  return (
+    db
+      .prepare("SELECT * FROM voiceprints WHERE universe_id = ? ORDER BY person_name, created_at DESC")
+      .all(universeId) as VoiceprintDbRow[]
+  ).map(toVoiceprint);
+}
+
+export function getVoiceprint(id: string): VoiceprintRow | null {
+  const row = db.prepare("SELECT * FROM voiceprints WHERE id = ?").get(id) as VoiceprintDbRow | undefined;
+  return row ? toVoiceprint(row) : null;
+}
+
+export function deleteVoiceprint(id: string): boolean {
+  return db.prepare("DELETE FROM voiceprints WHERE id = ?").run(id).changes > 0;
+}

@@ -1,245 +1,182 @@
-import {
-  Loader2,
-  CheckCircle2,
-  AlertTriangle,
-  Search,
-  BookOpen,
-  ShieldCheck,
-  FileOutput,
-  Cog,
-  FileText,
-} from "lucide-react";
+import type { ReactNode } from "react";
+import { Loader2, Check, Circle, AlertTriangle } from "lucide-react";
 import type { StepEvent } from "../hooks/useSSE";
 
-const STEP_ICONS: Record<string, React.ReactNode> = {
-  preprocessor: <Cog className="h-4 w-4" />,
-  analyst: <Search className="h-4 w-4" />,
-  summarizer: <BookOpen className="h-4 w-4" />,
-  validator: <ShieldCheck className="h-4 w-4" />,
-  formatter: <FileOutput className="h-4 w-4" />,
-};
+type Status = "pending" | "in_progress" | "completed" | "interrupted";
 
-const STEP_NAMES: Record<string, string> = {
-  preprocessor: "Preprocessing",
-  analyst: "Analyse",
-  summarizer: "Resume par scene",
-  validator: "Validation par scene",
-  formatter: "Mise en forme",
-};
-
-const MAIN_STEP_ORDER = [
-  "preprocessor",
-  "analyst",
-  "summarizer",
-  "validator",
-  "formatter",
+/**
+ * Étapes du traitement, dans l'ordre. `optional` : affichée seulement si le serveur l'annonce
+ * (pas de transcription pour un transcript texte, pas de vérification s'il n'y a aucun doute).
+ * `weight` : part approximative du temps total, pour la barre de progression.
+ */
+const STAGES = [
+  { id: "upload", name: "Envoi de l'enregistrement", optional: true, weight: 8 },
+  { id: "transcribe", name: "Transcription de l'enregistrement", optional: true, weight: 30 },
+  { id: "voices", name: "Qui parle ? Identification des voix", optional: false, weight: 4 },
+  { id: "ledger", name: "Écoute de la séance : qui fait quoi", optional: false, weight: 36 },
+  { id: "consolidate", name: "Découpage en chapitres", optional: false, weight: 5 },
+  { id: "review", name: "Ta vérification des passages douteux", optional: true, weight: 0 },
+  { id: "write", name: "Rédaction et relecture des chapitres", optional: false, weight: 22 },
+  { id: "format", name: "Compte-rendu prêt", optional: false, weight: 3 },
 ] as const;
 
-function getSceneGroup(stepId: string): "summarizer" | "validator" | null {
-  if (stepId.startsWith("summarizer_scene_")) return "summarizer";
-  if (stepId.startsWith("validator_scene_")) return "validator";
-  return null;
+const STATUS_TEXT: Record<Status, string> = {
+  pending: "À venir",
+  in_progress: "En cours",
+  completed: "Terminé",
+  interrupted: "Interrompu",
+};
+
+function rawStatus(step: StepEvent | undefined): "pending" | "in_progress" | "completed" {
+  const raw = step?.data?.status;
+  return raw === "in_progress" || raw === "completed" ? raw : "pending";
 }
 
-function isSceneStep(stepId: string): boolean {
-  return getSceneGroup(stepId) !== null;
-}
-
-function getStepStatus(step: StepEvent): "pending" | "in_progress" | "completed" {
-  const raw = step.data?.status;
-  if (raw === "in_progress" || raw === "completed") return raw;
-  return "pending";
-}
-
-function getSceneId(step: StepEvent): number {
-  const fromData = step.data?.sceneId;
-  if (typeof fromData === "number") return fromData;
-  const match = step.step.match(/_(\d+)$/);
-  if (!match) return Number.MAX_SAFE_INTEGER;
-  return Number(match[1]);
+function StatusIcon({ status }: { status: Status }) {
+  switch (status) {
+    case "completed":
+      return (
+        <span className="flex h-7 w-7 items-center justify-center rounded-full bg-ok text-surface">
+          <Check className="h-4 w-4" strokeWidth={3} />
+        </span>
+      );
+    case "in_progress":
+      return (
+        <span className="flex h-7 w-7 items-center justify-center rounded-full bg-accent-soft text-accent-ink">
+          <Loader2 className="h-4 w-4 animate-spin" />
+        </span>
+      );
+    case "interrupted":
+      return (
+        <span className="flex h-7 w-7 items-center justify-center rounded-full bg-danger-soft text-danger">
+          <AlertTriangle className="h-4 w-4" />
+        </span>
+      );
+    default:
+      return (
+        <span className="flex h-7 w-7 items-center justify-center rounded-full border border-line-strong text-ink-subtle">
+          <Circle className="h-2 w-2" fill="currentColor" />
+        </span>
+      );
+  }
 }
 
 interface ProgressPanelProps {
   steps: StepEvent[];
-  currentStep: string | null;
   error: string | null;
   isProcessing: boolean;
+  /** Une vérification attend l'utilisateur : la génération est en pause. */
+  awaitingReview?: boolean;
+  actions?: ReactNode;
 }
 
-export default function ProgressPanel({
-  steps,
-  currentStep: _currentStep,
-  error,
-  isProcessing,
-}: ProgressPanelProps) {
-  if (steps.length === 0 && !error) return null;
+export default function ProgressPanel({ steps, error, isProcessing, awaitingReview = false, actions }: ProgressPanelProps) {
+  const byId = new Map<string, StepEvent>();
+  for (const step of steps) byId.set(step.step, step);
+  const interrupted = !!error;
 
-  const latestById = steps.reduce((map, step) => {
-    map.set(step.step, step);
-    return map;
-  }, new Map<string, StepEvent>());
+  const stages = STAGES.filter((stage) => !stage.optional || byId.has(stage.id)).map((stage) => {
+    const step = byId.get(stage.id);
+    let status: Status = rawStatus(step);
+    if (status === "in_progress" && interrupted) status = "interrupted";
+    if (status === "in_progress" && !isProcessing && !interrupted) status = "completed";
+    return { ...stage, step, status };
+  });
 
-  const allSteps = Array.from(latestById.values());
-
-  const mainSteps = MAIN_STEP_ORDER
-    .map((id) => latestById.get(id))
-    .filter((s): s is StepEvent => !!s);
-
-  const summarizerSceneSteps = allSteps
-    .filter((s) => getSceneGroup(s.step) === "summarizer")
-    .sort((a, b) => getSceneId(a) - getSceneId(b));
-
-  const validatorSceneSteps = allSteps
-    .filter((s) => getSceneGroup(s.step) === "validator")
-    .sort((a, b) => getSceneId(a) - getSceneId(b));
-
-  const extraSteps = allSteps.filter(
-    (s) => !isSceneStep(s.step) && !MAIN_STEP_ORDER.includes(s.step as (typeof MAIN_STEP_ORDER)[number])
+  const total = stages.reduce((sum, s) => sum + s.weight, 0) || 1;
+  const done = stages.reduce(
+    (sum, s) => sum + (s.status === "completed" ? s.weight : s.status === "pending" ? 0 : s.weight * 0.4),
+    0
   );
+  const percent = Math.round((done / total) * 100);
 
-  const orderedMainSteps = [...mainSteps, ...extraSteps];
+  const active = stages.find((s) => s.status === "in_progress" || s.status === "interrupted");
+  const allDone = stages.every((s) => s.status === "completed");
+  const summary = interrupted
+    ? "Génération interrompue"
+    : awaitingReview
+      ? "En pause : quelques passages à vérifier"
+      : allDone
+        ? "Compte-rendu prêt"
+        : (active?.step?.label ?? active?.name ?? "Préparation…");
 
   return (
-    <div className="card p-6">
-      <h3 className="mb-4 text-sm font-semibold text-parchment-900">Progression</h3>
+    <section className="card overflow-hidden" aria-labelledby="progress-title">
+      <div className="border-b border-line px-5 py-5">
+        <h1 id="progress-title" className="text-xl font-semibold text-ink">
+          {interrupted ? "Génération interrompue" : allDone ? "Compte-rendu prêt" : "Génération en cours"}
+        </h1>
+        <p className="mt-1 text-sm text-ink-muted">
+          {interrupted
+            ? "La connexion a été perdue. Reprends le suivi : le travail déjà fait est conservé tant que le serveur n'a pas redémarré."
+            : awaitingReview
+              ? "Réponds aux questions ci-dessus : la rédaction reprend dès que tu valides."
+              : "Tu peux quitter cette page, la génération continue."}
+        </p>
 
-      <div className="space-y-3">
-        {orderedMainSteps.map((step) => {
-          const childSteps =
-            step.step === "summarizer"
-              ? summarizerSceneSteps
-              : step.step === "validator"
-                ? validatorSceneSteps
-                : [];
-
-          const status = getStepStatus(step);
-          const childActive = childSteps.some((child) => getStepStatus(child) === "in_progress");
-          const childDone =
-            childSteps.length > 0 &&
-            childSteps.every((child) => getStepStatus(child) === "completed");
-
-          const isActive = status === "in_progress" || childActive;
-          const isDone =
-            status === "completed" ||
-            childDone ||
-            (!isProcessing && status !== "in_progress");
-
-          return (
-            <div key={step.step}>
-              <div
-                className={`flex items-start gap-3 rounded-lg px-3 py-2.5 transition-all ${
-                  isActive ? "bg-parchment-50 ring-1 ring-parchment-300" : isDone ? "opacity-70" : ""
-                }`}
-              >
-                <div
-                  className={`mt-0.5 flex-shrink-0 ${
-                    isActive ? "text-parchment-600" : isDone ? "text-green-500" : "text-parchment-400"
-                  }`}
-                >
-                  {isActive ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : isDone ? (
-                    <CheckCircle2 className="h-4 w-4" />
-                  ) : (
-                    STEP_ICONS[step.step] || <Cog className="h-4 w-4" />
-                  )}
-                </div>
-
-                <div className="flex-1 min-w-0">
-                  <p className={`text-sm font-medium ${isActive ? "text-parchment-900" : "text-parchment-600"}`}>
-                    {STEP_NAMES[step.step] || step.step}
-                  </p>
-                  <p className="text-xs text-parchment-500 truncate">{step.label}</p>
-
-                  {step.data && step.step === "analyst" && isDone && (
-                    <div className="mt-1.5 flex flex-wrap gap-2">
-                      <span className="inline-flex items-center rounded-full bg-parchment-100 px-2 py-0.5 text-xs text-parchment-700">
-                        {String((step.data.scenesCount as number) || 0)} scenes
-                        {step.data.narrativeScenesCount != null && (
-                          <> ({String(step.data.narrativeScenesCount)} narratives)</>
-                        )}
-                      </span>
-                      {step.data.speakerMap ? (
-                        <span className="inline-flex items-center rounded-full bg-parchment-100 px-2 py-0.5 text-xs text-parchment-700">
-                          {String(
-                            Object.keys(step.data.speakerMap as Record<string, unknown>).length
-                          )}{" "}
-                          speakers
-                        </span>
-                      ) : null}
-                    </div>
-                  )}
-
-                  {step.data && (step.step === "summarizer" || step.step === "validator") && (
-                    <div className="mt-1.5 flex flex-wrap gap-2">
-                      {step.data.totalScenes != null && (
-                        <span className="inline-flex items-center rounded-full bg-parchment-100 px-2 py-0.5 text-xs text-parchment-700">
-                          {String(step.data.totalScenes)} scenes ciblees
-                        </span>
-                      )}
-                      {step.step === "summarizer" && step.data.summariesCount != null && (
-                        <span className="inline-flex items-center rounded-full bg-parchment-100 px-2 py-0.5 text-xs text-parchment-700">
-                          {String(step.data.summariesCount)} resumees
-                        </span>
-                      )}
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              {childSteps.length > 0 && (
-                <div className="ml-6 mt-1 space-y-1 border-l-2 border-parchment-200 pl-3">
-                  {childSteps.map((sceneStep) => {
-                    const sceneStatus = getStepStatus(sceneStep);
-                    const sceneActive = sceneStatus === "in_progress";
-                    const sceneDone =
-                      sceneStatus === "completed" ||
-                      (!isProcessing && sceneStatus !== "in_progress");
-
-                    return (
-                      <div
-                        key={sceneStep.step}
-                        className={`flex items-start gap-2 rounded-md px-2 py-1.5 text-xs transition-all ${
-                          sceneActive ? "bg-amber-50 ring-1 ring-amber-200" : ""
-                        }`}
-                      >
-                        <div className="mt-0.5 flex-shrink-0 text-parchment-500">
-                          {sceneActive ? (
-                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                          ) : sceneDone ? (
-                            <CheckCircle2 className="h-3.5 w-3.5 text-green-500" />
-                          ) : sceneStep.step.startsWith("validator_scene_") ? (
-                            <ShieldCheck className="h-3.5 w-3.5" />
-                          ) : (
-                            <FileText className="h-3.5 w-3.5" />
-                          )}
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <p className={sceneActive ? "font-medium text-parchment-900" : "text-parchment-600"}>
-                            {sceneStep.label}
-                          </p>
-                          {sceneStep.data && sceneStep.data.startLine != null && (
-                            <p className="mt-0.5 text-parchment-400">
-                              Lignes {String(sceneStep.data.startLine)}-{String(sceneStep.data.endLine)} uniquement
-                            </p>
-                          )}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          );
-        })}
+        <div className="mt-5">
+          <div className="mb-2 flex items-baseline justify-between gap-3 text-sm">
+            <span className="min-w-0 truncate font-medium text-ink">{summary}</span>
+            <span className="tabular-nums text-ink-muted">{percent} %</span>
+          </div>
+          <div
+            role="progressbar"
+            aria-label="Avancement de la génération"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={percent}
+            aria-valuetext={summary}
+            className="h-2 overflow-hidden rounded-full bg-sunken"
+          >
+            <div
+              className={`h-full rounded-full transition-[width] duration-500 ease-out ${interrupted ? "bg-danger" : "bg-accent"}`}
+              style={{ width: `${Math.max(percent, 2)}%` }}
+            />
+          </div>
+        </div>
+        <p className="sr-only" aria-live="polite">
+          {summary}
+        </p>
       </div>
 
-      {error && (
-        <div className="mt-4 flex items-start gap-2 rounded-lg bg-red-50 p-3 text-sm text-red-700">
-          <AlertTriangle className="h-4 w-4 mt-0.5 flex-shrink-0" />
-          <p>{error}</p>
+      <ol className="px-5 py-5">
+        {stages.map((stage, index) => (
+          <li key={stage.id} className="relative flex gap-4 pb-5 last:pb-0">
+            {index < stages.length - 1 && (
+              <span
+                className={`absolute left-[13px] top-8 bottom-0 w-px ${stage.status === "completed" ? "bg-ok/50" : "bg-line-strong"}`}
+                aria-hidden="true"
+              />
+            )}
+            <StatusIcon status={stage.status} />
+            <div className="min-w-0 flex-1 pt-0.5">
+              <div className="flex flex-wrap items-baseline justify-between gap-x-3">
+                <p className={`text-base ${stage.status === "pending" ? "text-ink-muted" : "font-semibold text-ink"}`}>
+                  {stage.name}
+                </p>
+                <p className={`text-sm ${stage.status === "interrupted" ? "text-danger" : "text-ink-muted"}`}>
+                  {STATUS_TEXT[stage.status]}
+                </p>
+              </div>
+              {stage.step?.label && stage.step.label !== stage.name && stage.status !== "pending" && (
+                <p className="mt-0.5 text-sm text-ink-muted">{stage.step.label}</p>
+              )}
+            </div>
+          </li>
+        ))}
+      </ol>
+
+      {(error || actions) && (
+        <div className="space-y-4 border-t border-line bg-sunken/60 px-5 py-4">
+          {error && (
+            <p role="alert" className="flex items-start gap-2 text-sm text-danger">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+              {error}
+            </p>
+          )}
+          {actions && <div className="flex flex-col gap-2 sm:flex-row">{actions}</div>}
         </div>
       )}
-    </div>
+    </section>
   );
 }

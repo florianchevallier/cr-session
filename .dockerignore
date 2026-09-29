@@ -10,6 +10,9 @@ frontend/node_modules
 backend/dist
 frontend/dist
 backend/data
+backend/eval
+backend/scripts
+claudedocs
 
 .env
 *.log

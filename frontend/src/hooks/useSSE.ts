@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { createProcessJob } from "../lib/api";
-import type { ProcessConfig } from "../lib/api";
+import type { PendingReview, ProcessConfig } from "../lib/api";
 
 export interface StepEvent {
   step: string;
@@ -16,14 +16,9 @@ export interface SSEState {
   result: string | null;
   resultData: Record<string, unknown> | null;
   error: string | null;
+  /** Attributions incertaines en attente de confirmation par l'utilisateur. */
+  review: PendingReview | null;
 }
-
-type ScenePayload = {
-  id: number;
-  title: string;
-  startLine: number;
-  endLine: number;
-};
 
 function upsertStep(
   steps: StepEvent[],
@@ -72,6 +67,7 @@ export function useSSE() {
     result: null,
     resultData: null,
     error: null,
+    review: null,
   });
 
   const abortRef = useRef<AbortController | null>(null);
@@ -79,39 +75,6 @@ export function useSSE() {
 
   const handleEvent = useCallback((type: string, data: Record<string, unknown>) => {
     switch (type) {
-      case "step:scenes": {
-        const group = data.group === "validator" ? "validator" : "summarizer";
-        const scenes = (data.scenes as ScenePayload[]) ?? [];
-        setState((prev) => {
-          let nextSteps = [...prev.steps];
-          for (const scene of scenes) {
-            const stepId = `${group}_scene_${scene.id}`;
-            const label =
-              group === "validator"
-                ? `Validation scène ${scene.id} : ${scene.title} (L${scene.startLine}-${scene.endLine})`
-                : `Scène ${scene.id} : ${scene.title} (L${scene.startLine}-${scene.endLine})`;
-            nextSteps = upsertStep(
-              nextSteps,
-              {
-                step: stepId,
-                label,
-                data: {
-                  sceneId: scene.id,
-                  title: scene.title,
-                  startLine: scene.startLine,
-                  endLine: scene.endLine,
-                  group,
-                  status: "pending",
-                },
-              },
-              true
-            );
-          }
-          return { ...prev, steps: nextSteps };
-        });
-        break;
-      }
-
       case "step:start": {
         const stepId = data.step as string;
         const label = data.label as string;
@@ -134,6 +97,19 @@ export function useSSE() {
         break;
       }
 
+      case "review":
+        setState((prev) => ({
+          ...prev,
+          review: {
+            jobId: data.jobId as string,
+            items: (data.items as PendingReview["items"]) ?? [],
+            candidates: (data.candidates as string[]) ?? [],
+            people: [...new Set(((data.people as string[]) ?? []).filter(Boolean))],
+            hasAudio: data.hasAudio === true,
+          },
+        }));
+        break;
+
       case "step:complete":
         setState((prev) => {
           const stepId = data.step as string;
@@ -151,18 +127,16 @@ export function useSSE() {
             },
             true
           );
-          return { ...prev, steps };
+          return { ...prev, steps, review: stepId === "review" ? null : prev.review };
         });
         break;
 
       case "step:progress":
         setState((prev) => ({
           ...prev,
-          steps: prev.steps.map((s) =>
-            s.step === data.step
-              ? { ...s, label: data.label as string }
-              : s
-          ),
+          steps: prev.steps.some((s) => s.step === data.step)
+            ? prev.steps.map((s) => (s.step === data.step ? { ...s, label: data.label as string } : s))
+            : [...prev.steps, { step: data.step as string, label: data.label as string, data: { status: "in_progress" } }],
         }));
         break;
 
@@ -212,6 +186,7 @@ export function useSSE() {
         result: null,
         resultData: null,
         error: null,
+        review: null,
       });
 
       let terminalEventReceived = false;
@@ -301,7 +276,7 @@ export function useSSE() {
             currentStep: null,
             error:
               prev.error ||
-              "Connexion au job interrompue. Clique sur \"Suivre\" pour reprendre.",
+              "Connexion au traitement interrompue avant la fin.",
           }));
         }
       } catch (err) {
@@ -315,7 +290,7 @@ export function useSSE() {
             activeJobId: null,
             isProcessing: false,
             currentStep: null,
-            error: "Ce job n'est plus disponible (backend redémarré ou job expiré).",
+            error: "Ce traitement n'est plus disponible (serveur redémarré ou traitement expiré).",
           }));
           return;
         }
@@ -343,10 +318,23 @@ export function useSSE() {
         result: null,
         resultData: null,
         error: null,
+        review: null,
       });
 
       try {
-        const job = await createProcessJob(config);
+        const showUpload = (fraction: number) =>
+          setState((prev) => ({
+            ...prev,
+            steps: [
+              ...prev.steps.filter((st) => st.step !== "upload"),
+              {
+                step: "upload",
+                label: `Envoi de l'enregistrement — ${Math.round(fraction * 100)} %`,
+                data: { status: fraction >= 1 ? "completed" : "in_progress" },
+              },
+            ],
+          }));
+        const job = await createProcessJob(config, showUpload);
         await followJob(job.id);
       } catch (err) {
         saveActiveJobId(null);
@@ -361,6 +349,11 @@ export function useSSE() {
     },
     [followJob]
   );
+
+  /** Masque la revue localement une fois les décisions envoyées (le serveur reprend la rédaction). */
+  const clearReview = useCallback(() => {
+    setState((prev) => ({ ...prev, review: null }));
+  }, []);
 
   const cancel = useCallback(() => {
     abortRef.current?.abort();
@@ -381,5 +374,5 @@ export function useSSE() {
     };
   }, [followJob]);
 
-  return { ...state, process, followJob, cancel };
+  return { ...state, process, followJob, cancel, clearReview };
 }

@@ -1,9 +1,13 @@
-import { Clock3, Eye, Trash2 } from "lucide-react";
+import { useState } from "react";
+import { BookMarked, ChevronRight, Trash2 } from "lucide-react";
 import type { ReportSummary } from "../lib/api";
+import { formatDate, formatDateTime } from "../lib/format";
+import Notice from "./ui/Notice";
 
 interface ReportHistoryPanelProps {
   history: ReportSummary[];
   activeReportId: string | null;
+  universeLabels: Record<string, string>;
   onOpenReport: (reportId: string) => void;
   onDeleteReport: (reportId: string) => void;
   onClearHistory: () => void;
@@ -11,122 +15,120 @@ interface ReportHistoryPanelProps {
   storageError?: string | null;
 }
 
-const dateFormatter = new Intl.DateTimeFormat("fr-FR", {
-  dateStyle: "medium",
-  timeStyle: "short",
-});
+const INITIAL_VISIBLE = 5;
 
-function formatDate(value: string): string {
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? value : dateFormatter.format(parsed);
-}
-
-function formatPlayers(
-  players: Array<{ playerName: string; characterName: string }>
-): string {
+function castLine(players: ReportSummary["players"]): string {
   return players
-    .filter((p) => p.playerName || p.characterName)
-    .map((p) =>
-      p.playerName && p.characterName
-        ? `${p.playerName} (${p.characterName})`
-        : p.playerName || p.characterName
-    )
+    .map((p) => p.characterName?.trim() || p.playerName?.trim())
+    .filter(Boolean)
     .join(", ");
 }
 
 export default function ReportHistoryPanel({
   history,
   activeReportId,
+  universeLabels,
   onOpenReport,
   onDeleteReport,
   onClearHistory,
   openDisabled = false,
   storageError = null,
 }: ReportHistoryPanelProps) {
+  const [showAll, setShowAll] = useState(false);
+  const visible = showAll ? history : history.slice(0, INITIAL_VISIBLE);
+  const hidden = history.length - visible.length;
+
   return (
-    <div className="card p-6 space-y-4">
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2">
-          <Clock3 className="h-5 w-5 text-parchment-600" />
-          <h3 className="text-sm font-semibold text-parchment-900">
-            Historique des comptes-rendus
-          </h3>
-        </div>
+    <section aria-labelledby="history-title" className="card p-5">
+      <div className="flex items-baseline justify-between gap-3">
+        <h2 id="history-title" className="section-title flex items-center gap-2">
+          <BookMarked className="h-4 w-4 text-accent-ink" aria-hidden="true" />
+          Historique
+        </h2>
         {history.length > 0 && (
-          <button
-            type="button"
-            onClick={onClearHistory}
-            className="btn-secondary text-xs"
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-            Tout supprimer
-          </button>
+          <span className="text-sm text-ink-muted">{history.length}</span>
         )}
       </div>
 
       {storageError && (
-        <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">
+        <Notice tone="warn" className="mt-3">
           {storageError}
-        </p>
+        </Notice>
       )}
 
       {history.length === 0 ? (
-        <p className="text-xs text-parchment-500">
-          Aucun compte-rendu enregistré pour le moment.
-        </p>
-      ) : (
-        <div className="space-y-2">
-          {history.map((item) => {
-            const playersStr = formatPlayers(item.players);
-            return (
-              <div
-                key={item.id}
-                className={`rounded-lg border px-3 py-2.5 transition-colors ${
-                  item.id === activeReportId
-                    ? "border-parchment-500 bg-parchment-50"
-                    : "border-parchment-200 bg-white"
-                }`}
-              >
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <p className="truncate text-sm font-medium text-parchment-900">
-                      {item.universeName} - {item.transcriptName}
-                    </p>
-                    <p className="text-xs text-parchment-500">
-                      {formatDate(item.createdAt)}
-                    </p>
-                    {playersStr && (
-                      <p className="mt-0.5 truncate text-xs text-parchment-500">
-                        {playersStr}
-                      </p>
-                    )}
-                  </div>
-
-                  <div className="flex shrink-0 items-center gap-1.5">
-                    <button
-                      type="button"
-                      onClick={() => onOpenReport(item.id)}
-                      disabled={openDisabled}
-                      className="btn-secondary px-2.5 py-1.5 text-xs disabled:opacity-50"
-                    >
-                      <Eye className="h-3.5 w-3.5" />
-                      Ouvrir
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => onDeleteReport(item.id)}
-                      className="rounded-lg p-2 text-parchment-400 transition-colors hover:bg-red-50 hover:text-red-500"
-                      aria-label="Supprimer ce compte-rendu"
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </button>
-                  </div>
-                </div>
-              </div>
-            );
-          })}
+        <div className="mt-3">
+          <p className="text-sm text-ink-muted">Aucun compte-rendu pour l'instant.</p>
         </div>
+      ) : (
+        <>
+          <ul className="mt-4 space-y-2">
+            {visible.map((item) => {
+              const isActive = item.id === activeReportId;
+              const cast = castLine(item.players);
+              const universe = universeLabels[item.universeName] ?? item.universeName;
+              return (
+                <li key={item.id} className="group relative">
+                  <button
+                    type="button"
+                    onClick={() => onOpenReport(item.id)}
+                    disabled={openDisabled}
+                    aria-current={isActive ? "true" : undefined}
+                    className={`flex w-full items-start gap-3 rounded-lg border py-3 pl-4 pr-14 text-left transition-colors duration-150 ${
+                      isActive
+                        ? "border-accent/50 bg-accent-soft/70"
+                        : "border-line bg-surface hover:border-line-strong hover:bg-sunken"
+                    } disabled:opacity-60`}
+                  >
+                    <span className="min-w-0 flex-1">
+                      <span className="block text-sm font-semibold text-ink">
+                        {formatDateTime(item.createdAt)}
+                      </span>
+                      {cast && (
+                        <span className="mt-0.5 block truncate text-sm text-ink">{cast}</span>
+                      )}
+                      <span className="mt-0.5 block truncate text-xs text-ink-muted">
+                        {universe} · <span className="font-mono">{item.transcriptName}</span>
+                      </span>
+                    </span>
+                    <ChevronRight
+                      className="mt-0.5 h-4 w-4 shrink-0 text-ink-subtle transition-transform duration-150 group-hover:translate-x-0.5"
+                      aria-hidden="true"
+                    />
+                    <span className="sr-only">{isActive ? " (ouverte)" : " — ouvrir"}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (window.confirm(`Supprimer le compte-rendu du ${formatDate(item.createdAt)} ? Cette action est irréversible.`)) {
+                        onDeleteReport(item.id);
+                      }
+                    }}
+                    className="icon-btn-danger absolute right-2 top-2"
+                    aria-label={`Supprimer le compte-rendu du ${formatDateTime(item.createdAt)}`}
+                    title="Supprimer"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+
+          <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+            {hidden > 0 || showAll ? (
+              <button type="button" onClick={() => setShowAll((v) => !v)} className="btn-ghost btn-sm -ml-3">
+                {showAll ? "Réduire la liste" : `Voir les ${hidden} autres`}
+              </button>
+            ) : (
+              <span />
+            )}
+            <button type="button" onClick={onClearHistory} className="btn-danger btn-sm -mr-3">
+              Tout supprimer
+            </button>
+          </div>
+        </>
       )}
-    </div>
+    </section>
   );
 }

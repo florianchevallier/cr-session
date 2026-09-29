@@ -1,17 +1,14 @@
-import { WorkflowStateType } from "../graph/state.js";
+import type { ReportState } from "./types.js";
 
-const log = (msg: string, data?: Record<string, unknown>) => {
-  const payload = data ? ` ${JSON.stringify(data)}` : "";
-  console.log(`[cr] ${msg}${payload}`);
-};
+/** « Nom : description » → « **Nom** : description » (texte laissé tel quel sans séparateur). */
+function boldLabel(text: string): string {
+  const idx = text.indexOf(" : ");
+  if (idx <= 0 || idx > 80) return text;
+  return `**${text.slice(0, idx)}** : ${text.slice(idx + 3)}`;
+}
 
-export function formatterNode(
-  state: WorkflowStateType
-): Partial<WorkflowStateType> {
-  log("Début nœud: formatter (assemblage code)", {
-    scenesCount: state.sceneSummaries.length,
-  });
-
+/** Assemble le markdown du compte-rendu (code pur, sans LLM). */
+export function formatReport(state: ReportState): string {
   const orderedSummaries = [...state.sceneSummaries].sort(
     (a, b) => a.sceneId - b.sceneId
   );
@@ -20,7 +17,7 @@ export function formatterNode(
 
   // ── Header ──
 
-  parts.push(`# Compte-Rendu de Session — ${state.universeName || "JDR"}`);
+  parts.push(`# ${state.sessionTitle?.trim() || `Compte-Rendu de Session — ${state.universeName || "JDR"}`}`);
   parts.push("");
 
   if (state.playerInfo.length > 0) {
@@ -32,7 +29,7 @@ export function formatterNode(
     parts.push("");
   }
 
-  // ── Global summary from analyst scene summaries ──
+  // ── Global summary from scene synopses ──
 
   const sceneSynopses = state.scenes
     .filter((s) => s.type !== "meta" && s.type !== "pause" && s.summary)
@@ -45,15 +42,15 @@ export function formatterNode(
     parts.push("");
   }
 
-  // ── Scenes ──
+  // ── Chapters ──
 
+  let chapterNumber = 0;
   for (const summary of orderedSummaries) {
     const scene = state.scenes.find((s) => s.id === summary.sceneId);
     if (!scene || scene.type === "meta" || scene.type === "pause") continue;
+    chapterNumber++;
 
-    parts.push("---");
-    parts.push("");
-    parts.push(`## ${scene.title}`);
+    parts.push(`## Chapitre ${chapterNumber} : ${scene.title}`);
     parts.push("");
 
     if (scene.location) {
@@ -64,36 +61,31 @@ export function formatterNode(
     parts.push(summary.narrativeSummary);
     parts.push("");
 
-    const hasDiceRolls = summary.diceRolls.length > 0;
-    const hasNpcs = summary.npcsInvolved.length > 0;
+    const boxes: string[][] = [];
+
+    if (summary.diceRolls.length > 0) {
+      boxes.push([
+        "> **🎲 Jets de dés**",
+        ">",
+        ...summary.diceRolls.map(
+          (d) => `> - **${d.character}** — ${d.skill} : **${d.result}** — *${d.context}*`
+        ),
+      ]);
+    }
+
+    if (summary.npcsInvolved.length > 0) {
+      boxes.push(["> **👥 PNJs impliqués**", ">", ...summary.npcsInvolved.map((n) => `> - ${boldLabel(n)}`)]);
+    }
+
     const techNotes = summary.technicalNotes ?? [];
-    const hasTechNotes = techNotes.length > 0;
+    if (techNotes.length > 0) {
+      boxes.push(["> **📝 Notes techniques**", ">", ...techNotes.map((n) => `> - ${boldLabel(n)}`)]);
+    }
 
-    if (hasDiceRolls || hasNpcs || hasTechNotes) {
-      if (hasDiceRolls) {
-        parts.push("> **🎲 Jets de dés**");
-        for (const d of summary.diceRolls) {
-          parts.push(
-            `> - **${d.character}** — ${d.skill} : ${d.result} *(${d.context})*`
-          );
-        }
-        parts.push(">");
-      }
-
-      if (hasNpcs) {
-        parts.push(
-          `> **👥 PNJs impliqués** : ${summary.npcsInvolved.join(", ")}`
-        );
-        parts.push(">");
-      }
-
-      if (hasTechNotes) {
-        parts.push("> **📝 Notes techniques**");
-        for (const n of techNotes) {
-          parts.push(`> - ${n}`);
-        }
-      }
-
+    for (const box of boxes) {
+      parts.push("---");
+      parts.push("");
+      parts.push(...box);
       parts.push("");
     }
   }
@@ -126,12 +118,5 @@ export function formatterNode(
     parts.push("");
   }
 
-  const finalReport = parts.join("\n");
-
-  log("Fin nœud: formatter", { reportLength: finalReport.length });
-
-  return {
-    finalReport,
-    currentStep: "formatter_complete",
-  };
+  return parts.join("\n");
 }

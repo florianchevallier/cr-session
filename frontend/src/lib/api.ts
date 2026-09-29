@@ -2,13 +2,35 @@ export interface Universe {
   id: string;
   label: string;
   defaultPrompt: string;
+  isCustom: boolean;
 }
+
+export type CastRole = "player" | "gm" | "npc";
 
 export interface PlayerInfo {
   playerName: string;
   characterName: string;
-  speakerHint?: string;
+  /** player = joueur et son PJ (défaut), gm = meneur, npc = PNJ récurrent. */
+  role?: CastRole;
+  /** Autres noms du personnage, séparés par des virgules. */
+  aliases?: string;
   characterDetails?: string;
+}
+
+/** Une ligne est envoyée si elle est exploitable pour son rôle. */
+export function isSendablePlayer(p: PlayerInfo): boolean {
+  switch (p.role ?? "player") {
+    case "gm":
+      return !!p.playerName.trim();
+    case "npc":
+      return !!p.characterName.trim();
+    default:
+      return !!p.playerName.trim() && !!p.characterName.trim();
+  }
+}
+
+export function isAudioFile(file: File): boolean {
+  return file.type.startsWith("audio/") || /\.(aac|m4a|mp3|wav|ogg|oga|opus|flac|webm)$/i.test(file.name);
 }
 
 export interface ProcessConfig {
@@ -22,6 +44,7 @@ export interface ProcessConfig {
 export type ProcessJobStatus =
   | "pending"
   | "running"
+  | "review"
   | "completed"
   | "failed";
 
@@ -74,6 +97,50 @@ export async function createUniverse(
   return res.json();
 }
 
+export async function renameUniverse(
+  universeId: string,
+  label: string
+): Promise<Universe> {
+  const res = await fetch(`/api/universes/${encodeURIComponent(universeId)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ label }),
+  });
+
+  if (!res.ok) {
+    let errorMessage = "Failed to rename universe";
+    try {
+      const body = (await res.json()) as { message?: string };
+      if (body?.message) {
+        errorMessage = body.message;
+      }
+    } catch {
+      // Ignore JSON parse errors and keep default message.
+    }
+    throw new Error(errorMessage);
+  }
+
+  return res.json();
+}
+
+export async function deleteUniverse(universeId: string): Promise<void> {
+  const res = await fetch(`/api/universes/${encodeURIComponent(universeId)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) {
+    let errorMessage = "Failed to delete universe";
+    try {
+      const body = (await res.json()) as { message?: string };
+      if (body?.message) {
+        errorMessage = body.message;
+      }
+    } catch {
+      // Ignore JSON parse errors and keep default message.
+    }
+    throw new Error(errorMessage);
+  }
+}
+
 export interface UniverseDraft {
   universeContext: string;
   sessionHistory: string;
@@ -109,9 +176,56 @@ export async function checkHealth(): Promise<{ status: string; hasApiKey: boolea
   return res.json();
 }
 
-function toProcessFormData(config: ProcessConfig): FormData {
+/**
+ * Envoie un enregistrement par morceaux (requêtes courtes : pas de coupure par un proxy, reprise
+ * d'un morceau en cas d'erreur). Renvoie l'identifiant d'envoi à passer à la création du job.
+ */
+export async function uploadInChunks(
+  file: File,
+  onProgress?: (fraction: number) => void
+): Promise<string> {
+  const start = await fetch("/api/uploads", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ fileName: file.name, size: file.size }),
+  });
+  const { uploadId, chunkSize } = await jsonOrThrow<{ uploadId: string; chunkSize: number }>(start);
+  const total = Math.ceil(file.size / chunkSize);
+  let index = 0;
+  while (index < total) {
+    let lastError: unknown = null;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      try {
+        const res = await fetch(`/api/uploads/${encodeURIComponent(uploadId)}/chunks/${index}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/octet-stream" },
+          body: file.slice(index * chunkSize, (index + 1) * chunkSize),
+        });
+        if (res.status === 409) {
+          // Le serveur attend un autre morceau (réponse perdue) : on repart de là.
+          index = ((await res.json()) as { nextIndex: number }).nextIndex;
+          lastError = null;
+          break;
+        }
+        await jsonOrThrow(res);
+        index++;
+        lastError = null;
+        break;
+      } catch (err) {
+        lastError = err;
+        await new Promise((r) => setTimeout(r, 1000 * 2 ** attempt));
+      }
+    }
+    if (lastError) throw new Error(`Envoi interrompu au morceau ${index + 1}/${total} : ${(lastError as Error).message}`);
+    onProgress?.(Math.min(1, index / total));
+  }
+  return uploadId;
+}
+
+function toProcessFormData(config: ProcessConfig, uploadId?: string): FormData {
   const formData = new FormData();
-  formData.append("transcript", config.transcript);
+  if (uploadId) formData.append("uploadId", uploadId);
+  else formData.append("transcript", config.transcript);
   formData.append("transcriptName", config.transcript.name);
   formData.append("universeName", config.universeName);
   formData.append("universeContext", config.universeContext);
@@ -121,11 +235,16 @@ function toProcessFormData(config: ProcessConfig): FormData {
 }
 
 export async function createProcessJob(
-  config: ProcessConfig
+  config: ProcessConfig,
+  onUploadProgress?: (fraction: number) => void
 ): Promise<ProcessJobSummary> {
+  // Un enregistrement pèse des centaines de Mo : envoi par morceaux. Un transcript part d'un bloc.
+  const uploadId = isAudioFile(config.transcript)
+    ? await uploadInChunks(config.transcript, onUploadProgress)
+    : undefined;
   const res = await fetch("/api/jobs", {
     method: "POST",
-    body: toProcessFormData(config),
+    body: toProcessFormData(config, uploadId),
   });
   if (!res.ok) {
     let errorMessage = `HTTP ${res.status}`;
@@ -180,6 +299,8 @@ export interface ReportDetail {
   id: string;
   jobId: string | null;
   reportMd: string;
+  /** Coût Gemini de la génération (null pour les rapports d'avant le suivi des coûts). */
+  cost?: { costUsd: number; calls: number } | null;
   universeName: string;
   transcriptName: string;
   players: PlayerInfo[];
@@ -247,7 +368,7 @@ export interface SceneMeta {
   startLine: number;
   endLine: number;
   location?: string;
-  analystSummary?: string | null;
+  synopsis?: string | null;
   transcriptExcerpt?: string | null;
 }
 
@@ -365,4 +486,132 @@ export async function updateScene(
     throw new Error(errorMessage);
   }
   return res.json();
+}
+
+// ── Revue des attributions incertaines ───────────────────────────────────────
+
+export interface ReviewItem {
+  eventId: string;
+  t: number;
+  start: number;
+  end: number;
+  actor: string;
+  spokenBy: string;
+  action: string;
+  status: string;
+  confidence: number;
+  evidence: string;
+  /** Pourquoi l'analyse doute (voix qui se chevauchent, désaccord diarisation/analyse…). */
+  reasons: string[];
+  excerpt: string[];
+}
+
+export interface ReviewDecision {
+  eventId: string;
+  actor?: string;
+  drop?: boolean;
+}
+
+export interface PendingReview {
+  jobId: string;
+  items: ReviewItem[];
+  /** Personnages proposables comme acteur (PJ puis PNJ du casting). */
+  candidates: string[];
+  /** Personnes réelles à la table (pour enregistrer un échantillon de voix). */
+  people: string[];
+  hasAudio: boolean;
+}
+
+async function jsonOrThrow<T>(res: Response): Promise<T> {
+  if (!res.ok) {
+    let message = `HTTP ${res.status}`;
+    try {
+      const body = (await res.json()) as { message?: string };
+      if (body?.message) message = body.message;
+    } catch {
+      // garde le message HTTP
+    }
+    throw new Error(message);
+  }
+  return res.status === 204 ? (undefined as T) : res.json();
+}
+
+export async function fetchJobReview(jobId: string): Promise<PendingReview> {
+  return jsonOrThrow(await fetch(`/api/jobs/${encodeURIComponent(jobId)}/review`));
+}
+
+export async function submitJobReview(jobId: string, decisions: ReviewDecision[]): Promise<void> {
+  await jsonOrThrow(
+    await fetch(`/api/jobs/${encodeURIComponent(jobId)}/review`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ decisions }),
+    })
+  );
+}
+
+export function jobAudioUrl(jobId: string, start: number, end: number): string {
+  return `/api/jobs/${encodeURIComponent(jobId)}/audio?start=${start.toFixed(1)}&end=${end.toFixed(1)}`;
+}
+
+// ── Échantillons de voix ─────────────────────────────────────────────────────
+
+export interface Voiceprint {
+  id: string;
+  universeId: string;
+  personName: string;
+  durationSec: number | null;
+  source: string | null;
+  /** confirmed = validé (utilisé par l'analyse), pending = proposé automatiquement, à vérifier. */
+  status: "confirmed" | "pending";
+  createdAt: string;
+}
+
+export async function updateVoiceprint(
+  id: string,
+  patch: { status?: "confirmed" | "pending"; personName?: string }
+): Promise<Voiceprint> {
+  return jsonOrThrow(
+    await fetch(`/api/voiceprints/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    })
+  );
+}
+
+export async function listVoiceprints(universeId: string): Promise<Voiceprint[]> {
+  return jsonOrThrow(await fetch(`/api/universes/${encodeURIComponent(universeId)}/voiceprints`));
+}
+
+export async function uploadVoiceprint(universeId: string, personName: string, clip: File): Promise<Voiceprint> {
+  const form = new FormData();
+  form.append("personName", personName);
+  form.append("clip", clip);
+  return jsonOrThrow(
+    await fetch(`/api/universes/${encodeURIComponent(universeId)}/voiceprints`, { method: "POST", body: form })
+  );
+}
+
+export async function createVoiceprintFromJob(
+  jobId: string,
+  personName: string,
+  start: number,
+  end: number
+): Promise<Voiceprint> {
+  return jsonOrThrow(
+    await fetch(`/api/jobs/${encodeURIComponent(jobId)}/voiceprints`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ personName, start, end }),
+    })
+  );
+}
+
+export async function deleteVoiceprint(id: string): Promise<void> {
+  await jsonOrThrow(await fetch(`/api/voiceprints/${encodeURIComponent(id)}`, { method: "DELETE" }));
+}
+
+export function voiceprintAudioUrl(id: string): string {
+  return `/api/voiceprints/${encodeURIComponent(id)}/audio`;
 }

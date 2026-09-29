@@ -1,20 +1,14 @@
-import { Activity, Clock3, Eye } from "lucide-react";
+import { Loader2, Eye, RotateCw } from "lucide-react";
 import type { ProcessJobSummary } from "../lib/api";
+import { formatDateTime } from "../lib/format";
 
 interface ProcessingJobsPanelProps {
   jobs: ProcessJobSummary[];
   activeJobId: string | null;
+  isFollowing: boolean;
+  isViewing: boolean;
+  universeLabels: Record<string, string>;
   onFollowJob: (jobId: string) => void;
-}
-
-const dateFormatter = new Intl.DateTimeFormat("fr-FR", {
-  dateStyle: "short",
-  timeStyle: "short",
-});
-
-function formatDate(value: string): string {
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? value : dateFormatter.format(parsed);
 }
 
 function statusLabel(status: ProcessJobSummary["status"]): string {
@@ -23,6 +17,8 @@ function statusLabel(status: ProcessJobSummary["status"]): string {
       return "En attente";
     case "running":
       return "En cours";
+    case "review":
+      return "Attend ta vérification";
     case "completed":
       return "Terminé";
     case "failed":
@@ -35,61 +31,60 @@ function statusLabel(status: ProcessJobSummary["status"]): string {
 export default function ProcessingJobsPanel({
   jobs,
   activeJobId,
+  isFollowing,
+  isViewing,
+  universeLabels,
   onFollowJob,
 }: ProcessingJobsPanelProps) {
   if (jobs.length === 0) return null;
 
   return (
-    <div className="card p-6 space-y-4">
-      <div className="flex items-center gap-2">
-        <Activity className="h-5 w-5 text-parchment-600" />
-        <h3 className="text-sm font-semibold text-parchment-900">
-          Jobs de traitement en cours
-        </h3>
-      </div>
+    <section aria-labelledby="jobs-title" className="card p-5">
+      <h2 id="jobs-title" className="flex items-center gap-2 text-base font-semibold text-ink">
+        <Loader2 className="h-4 w-4 animate-spin text-accent-ink" aria-hidden="true" />
+        Générations en cours
+      </h2>
 
-      <div className="space-y-2">
+      <ul className="mt-3 space-y-2">
         {jobs.map((job) => {
-          const isActive = activeJobId === job.id;
+          const isShown = activeJobId === job.id && isFollowing && isViewing;
+          const canResume = activeJobId === job.id && !isFollowing;
           return (
-            <div
+            <li
               key={job.id}
-              className={`rounded-lg border px-3 py-2.5 transition-colors ${
-                isActive
-                  ? "border-parchment-500 bg-parchment-50"
-                  : "border-parchment-200 bg-white"
+              className={`flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg border px-3 py-2.5 ${
+                isShown ? "border-accent/40 bg-accent-soft/60" : "border-line bg-surface"
               }`}
             >
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-medium text-parchment-900">
-                    {job.universeName} - {job.transcriptName}
-                  </p>
-                  <div className="mt-0.5 flex flex-wrap items-center gap-2 text-xs text-parchment-500">
-                    <span className="inline-flex items-center rounded-full bg-parchment-100 px-2 py-0.5 text-parchment-700">
-                      {statusLabel(job.status)}
-                    </span>
-                    <span className="inline-flex items-center gap-1">
-                      <Clock3 className="h-3.5 w-3.5" />
-                      {formatDate(job.createdAt)}
-                    </span>
-                  </div>
-                </div>
+              <div className="min-w-[10rem] flex-1">
+                <p className="truncate text-sm font-medium text-ink">
+                  {universeLabels[job.universeName] ?? job.universeName}
+                </p>
+                <p className="truncate text-sm text-ink-muted">
+                  {statusLabel(job.status)} · {formatDateTime(job.createdAt)}
+                </p>
+              </div>
 
+              {isShown ? (
+                <span className="shrink-0 text-sm font-medium text-accent-ink">Affichée</span>
+              ) : (
                 <button
                   type="button"
                   onClick={() => onFollowJob(job.id)}
-                  className="btn-secondary px-2.5 py-1.5 text-xs"
-                  disabled={isActive}
+                  className="btn-secondary btn-sm shrink-0"
                 >
-                  <Eye className="h-3.5 w-3.5" />
-                  {isActive ? "Suivi en cours" : "Suivre"}
+                  {canResume ? (
+                    <RotateCw className="h-4 w-4" aria-hidden="true" />
+                  ) : (
+                    <Eye className="h-4 w-4" aria-hidden="true" />
+                  )}
+                  {canResume ? "Reprendre le suivi" : activeJobId === job.id ? "Voir la progression" : "Suivre"}
                 </button>
-              </div>
-            </div>
+              )}
+            </li>
           );
         })}
-      </div>
-    </div>
+      </ul>
+    </section>
   );
 }

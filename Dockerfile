@@ -38,11 +38,15 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=3001
 
+# ffmpeg : découpe et conversion de l'audio des séances (fenêtres Gemini, extraits, échantillons de voix).
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
+
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/backend/dist ./backend/dist
 COPY --from=builder /app/frontend/dist ./frontend/dist
 
-RUN mkdir -p /app/backend/data/editor-drafts /app/backend/data/universes
+# Données persistantes (volume) : SQLite, univers personnalisés, audio des traitements, échantillons de voix.
+RUN mkdir -p /app/backend/data/universes
 
 EXPOSE 3001
 

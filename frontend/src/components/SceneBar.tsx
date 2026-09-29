@@ -6,17 +6,17 @@ import {
   Settings,
   Coffee,
   RefreshCw,
-  Check,
   AlertTriangle,
   Loader2,
   ChevronDown,
-  ChevronUp,
   Hammer,
   Eye,
   EyeOff,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import type { SceneWithSummary } from "../lib/api";
+import { plural } from "../lib/format";
 
 interface SceneBarProps {
   scenes: SceneWithSummary[];
@@ -27,25 +27,29 @@ interface SceneBarProps {
   regeneratingSceneId: number | null;
   isRebuilding: boolean;
   activeSceneId: number | null;
+  footer?: ReactNode;
 }
 
-const TYPE_CONFIG: Record<
+export const SCENE_TYPES: Record<
   string,
   { icon: typeof BookOpen; label: string; color: string }
 > = {
-  narrative: { icon: BookOpen, label: "Narratif", color: "text-blue-600" },
-  combat: { icon: Swords, label: "Combat", color: "text-red-600" },
-  social: { icon: MessageSquare, label: "Social", color: "text-violet-600" },
-  exploration: { icon: Compass, label: "Exploration", color: "text-emerald-600" },
-  meta: { icon: Settings, label: "Méta", color: "text-parchment-400" },
-  pause: { icon: Coffee, label: "Pause", color: "text-parchment-400" },
+  narrative: { icon: BookOpen, label: "Récit", color: "text-scene-narrative" },
+  combat: { icon: Swords, label: "Combat", color: "text-scene-combat" },
+  social: { icon: MessageSquare, label: "Social", color: "text-scene-social" },
+  exploration: { icon: Compass, label: "Exploration", color: "text-scene-exploration" },
+  meta: { icon: Settings, label: "Hors jeu", color: "text-ink-subtle" },
+  pause: { icon: Coffee, label: "Pause", color: "text-ink-subtle" },
 };
 
-function SceneChip({
+const isMasked = (s: SceneWithSummary) => s.type === "meta" || s.type === "pause";
+
+function SceneRow({
   scene,
   onScrollToScene,
   onRegenerate,
   isRegenerating,
+  regenerationBusy,
   isActive,
   isInReport,
 }: {
@@ -53,151 +57,111 @@ function SceneChip({
   onScrollToScene: (sceneId: number) => void;
   onRegenerate: (sceneId: number) => void;
   isRegenerating: boolean;
+  regenerationBusy: boolean;
   isActive: boolean;
   isInReport: boolean;
 }) {
-  const isExcluded = scene.type === "meta" || scene.type === "pause";
-  const [showMaskedDetails, setShowMaskedDetails] = useState(false);
-  const hasMaskedDetails = isExcluded && (!!scene.transcriptExcerpt || !!scene.analystSummary);
-  const hasSummary = !!scene.summary;
-  const isMissing = !isExcluded && !hasSummary;
-  const isOutOfReport = !isExcluded && hasSummary && !isInReport;
-  const isHighlighted = !isExcluded && isActive;
-  const config = TYPE_CONFIG[scene.type] ?? TYPE_CONFIG.narrative;
+  const excluded = isMasked(scene);
+  const [showDetails, setShowDetails] = useState(false);
+  const hasDetails = excluded && (!!scene.transcriptExcerpt || !!scene.synopsis);
+  const isMissing = !excluded && !scene.summary;
+  const isOutOfReport = !excluded && !!scene.summary && !isInReport;
+  const config = SCENE_TYPES[scene.type] ?? SCENE_TYPES.narrative;
   const Icon = config.icon;
+  const status = isMissing ? "Absente" : isOutOfReport ? "Hors rapport" : null;
 
   return (
-    <div
-      data-scene-chip-id={scene.id}
-      className={`rounded-lg border px-3 py-2 text-xs transition-all ${
-        isExcluded
-          ? "border-parchment-200 bg-parchment-50/50 text-parchment-400"
-          : isHighlighted
-            ? "border-amber-400 bg-amber-50 text-amber-900 shadow-sm"
-            : isOutOfReport
-              ? "border-parchment-200 bg-parchment-50/70 text-parchment-500"
-          : isMissing
-            ? "border-amber-300 bg-amber-50 text-amber-800"
-            : "border-parchment-200 bg-white hover:border-parchment-400 text-parchment-700 hover:shadow-sm"
-      }`}
-    >
-      <div className="flex items-center gap-2">
-        <div className="flex items-center gap-1.5 min-w-0 flex-1">
-          <Icon className={`h-3.5 w-3.5 flex-shrink-0 ${config.color}`} />
-          {isHighlighted && (
-            <span className="h-1.5 w-1.5 rounded-full bg-amber-500 flex-shrink-0" />
-          )}
-          <span className="font-medium flex-shrink-0">{scene.id}.</span>
-          {!isExcluded ? (
-            <button
-              onClick={() => onScrollToScene(scene.id)}
-              disabled={!isInReport}
-              className={`truncate text-left ${
-                isHighlighted
-                  ? "font-semibold text-amber-900"
-                  : isInReport
-                    ? "hover:underline"
-                    : "cursor-not-allowed text-parchment-400"
-              }`}
-              title={scene.title}
-            >
-              {scene.title}
-            </button>
-          ) : (
+    <li data-scene-chip-id={scene.id}>
+      <div
+        className={`relative flex items-center gap-1 rounded-lg transition-colors duration-150 ${
+          isActive ? "bg-accent-soft" : "hover:bg-sunken"
+        }`}
+      >
+        {isActive && (
+          <span className="absolute inset-y-1.5 left-0 w-[3px] rounded-full bg-accent" aria-hidden="true" />
+        )}
+        {excluded ? (
+          <div className="flex min-h-[2.5rem] min-w-0 flex-1 items-center gap-2.5 px-3 text-sm text-ink-muted">
+            <Icon className={`h-4 w-4 shrink-0 ${config.color}`} aria-hidden="true" />
+            <span className="w-5 shrink-0 text-right tabular-nums">{scene.id}</span>
             <span className="truncate" title={scene.title}>
               {scene.title}
             </span>
-          )}
-        </div>
+            <span className="ml-auto shrink-0 text-xs">{config.label}</span>
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={() => onScrollToScene(scene.id)}
+            disabled={!isInReport}
+            aria-current={isActive ? "location" : undefined}
+            title={scene.title}
+            className="flex min-h-[2.5rem] min-w-0 flex-1 items-center gap-2.5 rounded-lg px-3 text-left text-sm disabled:cursor-not-allowed"
+          >
+            <Icon className={`h-4 w-4 shrink-0 ${config.color}`} aria-hidden="true" />
+            <span className="sr-only">{config.label}, scène</span>
+            <span className={`w-5 shrink-0 text-right tabular-nums ${isActive ? "text-accent-ink" : "text-ink-muted"}`}>
+              {scene.id}
+            </span>
+            <span className={`line-clamp-2 py-2 leading-snug ${isActive ? "font-semibold text-ink" : isInReport ? "text-ink" : "text-ink-muted"}`}>
+              {scene.title}
+            </span>
+            {status && (
+              <span
+                className={`ml-auto inline-flex shrink-0 items-center gap-1 text-xs font-medium ${
+                  isMissing ? "text-warn" : "text-ink-muted"
+                }`}
+              >
+                {isMissing && <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />}
+                {status}
+              </span>
+            )}
+          </button>
+        )}
 
-        <div className="flex items-center gap-1 flex-shrink-0">
-          {isExcluded ? (
-            <>
-              <span className="text-[10px] text-parchment-400 italic">
-                {config.label}
-              </span>
-              {hasMaskedDetails && (
-                <button
-                  onClick={() => setShowMaskedDetails((prev) => !prev)}
-                  className="ml-1 p-1 rounded-md text-parchment-400 hover:text-parchment-600 hover:bg-parchment-100 transition-all"
-                  title={
-                    showMaskedDetails
-                      ? "Masquer le contenu de la scène"
-                      : "Afficher le contenu de la scène"
-                  }
-                >
-                  {showMaskedDetails ? (
-                    <EyeOff className="h-3.5 w-3.5" />
-                  ) : (
-                    <Eye className="h-3.5 w-3.5" />
-                  )}
-                </button>
-              )}
-            </>
-          ) : isMissing ? (
-            <>
-              <AlertTriangle className="h-3 w-3 text-amber-500" />
-              <span className="text-[10px] text-amber-600 font-medium">
-                Absente
-              </span>
-            </>
-          ) : isOutOfReport ? (
-            <>
-              <EyeOff className="h-3 w-3 text-parchment-400" />
-              <span className="text-[10px] text-parchment-500 font-medium">
-                Hors rapport
-              </span>
-            </>
-          ) : (
-            <Check className="h-3 w-3 text-green-500" />
-          )}
-
-          {!isExcluded && (
-            <button
-              onClick={() => onRegenerate(scene.id)}
-              disabled={isRegenerating}
-              className={`ml-1 p-1 rounded-md transition-all ${
-                isRegenerating
-                  ? "text-amber-500 cursor-wait"
-                  : isMissing
-                    ? "text-amber-600 hover:bg-amber-100"
-                    : "text-parchment-400 hover:text-parchment-600 hover:bg-parchment-100"
-              }`}
-              title={
-                isMissing
-                  ? "Générer cette scène"
-                  : "Regénérer cette scène"
-              }
-            >
-              {isRegenerating ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <RefreshCw className="h-3.5 w-3.5" />
-              )}
-            </button>
-          )}
-        </div>
+        {excluded
+          ? hasDetails && (
+              <button
+                type="button"
+                onClick={() => setShowDetails((prev) => !prev)}
+                className="icon-btn h-9 w-9"
+                aria-expanded={showDetails}
+                aria-label={`${showDetails ? "Masquer" : "Afficher"} le contenu de la scène ${scene.id}`}
+              >
+                {showDetails ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+              </button>
+            )
+          : (
+              <button
+                type="button"
+                onClick={() => onRegenerate(scene.id)}
+                disabled={regenerationBusy}
+                className={`icon-btn h-9 w-9 ${isMissing ? "text-warn" : ""} ${isRegenerating ? "cursor-wait" : ""}`}
+                aria-label={`${isMissing ? "Générer" : "Régénérer"} la scène ${scene.id} : ${scene.title}`}
+                title={isMissing ? "Générer cette scène" : "Régénérer cette scène"}
+              >
+                {isRegenerating ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <RefreshCw className="h-4 w-4" />
+                )}
+              </button>
+            )}
       </div>
 
-      {isExcluded && showMaskedDetails && (
-        <div className="mt-2 rounded-md border border-parchment-200 bg-white/75 px-2.5 py-2 text-[11px] text-parchment-700 space-y-2">
-          {scene.analystSummary && (
-            <p className="italic">
-              {scene.analystSummary}
-            </p>
-          )}
+      {excluded && showDetails && (
+        <div className="mx-3 mb-2 mt-1 space-y-2 rounded-md border border-line bg-sunken px-3 py-2 text-sm text-ink-muted">
+          {scene.synopsis && <p className="italic">{scene.synopsis}</p>}
           {scene.transcriptExcerpt ? (
-            <pre className="max-h-48 overflow-y-auto whitespace-pre-wrap break-words font-mono leading-relaxed text-[10px] text-parchment-600">
+            <pre className="max-h-48 overflow-y-auto whitespace-pre-wrap break-words font-mono text-xs leading-relaxed">
               {scene.transcriptExcerpt}
             </pre>
           ) : (
-            <p className="italic text-parchment-500">
-              Extrait de transcript indisponible pour cette scène.
-            </p>
+            <p className="italic">Extrait du transcript indisponible pour cette scène.</p>
           )}
         </div>
       )}
-    </div>
+    </li>
   );
 }
 
@@ -210,152 +174,134 @@ export default function SceneBar({
   regeneratingSceneId,
   isRebuilding,
   activeSceneId,
+  footer,
 }: SceneBarProps) {
-  const [expanded, setExpanded] = useState(true);
-  const [showMaskedScenes, setShowMaskedScenes] = useState(false);
-  const chipsContainerRef = useRef<HTMLDivElement>(null);
+  const [expanded, setExpanded] = useState(
+    () => typeof window === "undefined" || window.matchMedia("(min-width: 1024px)").matches
+  );
+  const [showMasked, setShowMasked] = useState(false);
+  const listRef = useRef<HTMLDivElement>(null);
 
   const renderedSet = useMemo(() => new Set(renderedSceneIds), [renderedSceneIds]);
-  const narrativeScenes = scenes.filter(
-    (s) => s.type !== "meta" && s.type !== "pause"
-  );
-  const maskedScenes = scenes.filter(
-    (s) => s.type === "meta" || s.type === "pause"
-  );
-  const scenesToDisplay = showMaskedScenes ? scenes : narrativeScenes;
-  const totalNarrative = narrativeScenes.length;
-  const withSummary = narrativeScenes.filter((s) => s.summary).length;
-  const missing = totalNarrative - withSummary;
-  const outOfReport = narrativeScenes.filter(
-    (s) => s.summary && !renderedSet.has(s.id)
-  ).length;
+  const narrative = scenes.filter((s) => !isMasked(s));
+  const masked = scenes.filter(isMasked);
+  const shown = showMasked ? scenes : narrative;
+  const missing = narrative.filter((s) => !s.summary).length;
+  const outOfReport = narrative.filter((s) => s.summary && !renderedSet.has(s.id)).length;
+  const typesPresent = Array.from(new Set(narrative.map((s) => s.type))).filter((t) => SCENE_TYPES[t]);
 
   useEffect(() => {
-    if (!chipsContainerRef.current || activeSceneId === null || !expanded) return;
+    const container = listRef.current;
+    if (!container || activeSceneId === null || !expanded) return;
+    const chip = container.querySelector<HTMLElement>(`[data-scene-chip-id="${activeSceneId}"]`);
+    if (!chip) return;
 
-    const chipsContainer = chipsContainerRef.current;
-    const activeChip = chipsContainer.querySelector<HTMLElement>(
-      `[data-scene-chip-id="${activeSceneId}"]`
-    );
-
-    if (!activeChip) return;
-
-    // Keep the active chip visible without scrolling the whole page on mobile.
-    const chipTop = activeChip.offsetTop;
-    const chipBottom = chipTop + activeChip.offsetHeight;
-    const viewportTop = chipsContainer.scrollTop;
-    const viewportBottom = viewportTop + chipsContainer.clientHeight;
-
-    if (chipTop < viewportTop) {
-      chipsContainer.scrollTo({
-        top: Math.max(0, chipTop - 8),
-        behavior: "smooth",
-      });
-      return;
+    // Keep the active row visible inside the list without scrolling the page.
+    const top = chip.offsetTop;
+    const bottom = top + chip.offsetHeight;
+    if (top < container.scrollTop) {
+      container.scrollTo({ top: Math.max(0, top - 8) });
+    } else if (bottom > container.scrollTop + container.clientHeight) {
+      container.scrollTo({ top: bottom - container.clientHeight + 8 });
     }
-
-    if (chipBottom > viewportBottom) {
-      chipsContainer.scrollTo({
-        top: chipBottom - chipsContainer.clientHeight + 8,
-        behavior: "smooth",
-      });
-    }
-  }, [activeSceneId, expanded, showMaskedScenes]);
+  }, [activeSceneId, expanded, showMasked]);
 
   if (scenes.length === 0) return null;
 
   return (
-    <div className="card border-parchment-200 overflow-hidden lg:max-h-[calc(100vh-3rem)]">
+    <nav aria-label="Sommaire des scènes" className="card flex max-h-full flex-col overflow-hidden">
       <button
-        onClick={() => setExpanded(!expanded)}
-        className="w-full flex items-center justify-between px-4 py-3 hover:bg-parchment-50/50 transition-colors"
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        aria-expanded={expanded}
+        aria-controls="scene-list"
+        className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left transition-colors duration-150 hover:bg-sunken"
       >
-        <div className="flex items-center gap-3">
-          <h3 className="text-sm font-semibold text-parchment-800">
-            Navigation des scènes
-          </h3>
-          <div className="flex items-center gap-2 text-xs">
-            <span className="text-parchment-500">
-              {withSummary}/{totalNarrative}
-            </span>
-            {missing > 0 && (
-              <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700">
-                <AlertTriangle className="h-2.5 w-2.5" />
-                {missing} absente{missing > 1 ? "s" : ""}
-              </span>
-            )}
-            {outOfReport > 0 && (
-              <span className="inline-flex items-center gap-1 rounded-full bg-parchment-100 px-2 py-0.5 text-[10px] font-medium text-parchment-600">
-                <EyeOff className="h-2.5 w-2.5" />
-                {outOfReport} hors rapport
-              </span>
-            )}
-            {maskedScenes.length > 0 && (
-              <span className="inline-flex items-center gap-1 rounded-full bg-parchment-100 px-2 py-0.5 text-[10px] font-medium text-parchment-600">
-                <EyeOff className="h-2.5 w-2.5" />
-                {maskedScenes.length} masquée{maskedScenes.length > 1 ? "s" : ""}
-              </span>
-            )}
-          </div>
-        </div>
-        {expanded ? (
-          <ChevronUp className="h-4 w-4 text-parchment-400" />
-        ) : (
-          <ChevronDown className="h-4 w-4 text-parchment-400" />
-        )}
+        <span>
+          <span className="block text-base font-semibold text-ink">Sommaire</span>
+          <span className="block text-sm text-ink-muted">
+            {plural(narrative.length, "scène")}
+            {missing > 0 && ` · ${plural(missing, "absente")}`}
+            {outOfReport > 0 && ` · ${outOfReport} hors rapport`}
+          </span>
+        </span>
+        <ChevronDown
+          className={`h-5 w-5 shrink-0 text-ink-muted transition-transform duration-150 ${expanded ? "rotate-180" : ""}`}
+          aria-hidden="true"
+        />
       </button>
 
       {expanded && (
-        <div
-          ref={chipsContainerRef}
-          className="px-4 pb-3 space-y-1.5 max-h-72 overflow-y-auto lg:max-h-[calc(100vh-8.5rem)]"
-        >
-          {maskedScenes.length > 0 && (
-            <button
-              onClick={() => setShowMaskedScenes((prev) => !prev)}
-              className="w-full mb-1 flex items-center justify-center gap-2 rounded-lg border border-parchment-200 bg-parchment-50/60 px-3 py-2 text-xs font-medium text-parchment-700 hover:bg-parchment-100/70 transition-all"
-            >
-              {showMaskedScenes ? (
-                <EyeOff className="h-3.5 w-3.5" />
-              ) : (
-                <Eye className="h-3.5 w-3.5" />
-              )}
-              {showMaskedScenes
-                ? "Masquer les scènes méta/pause"
-                : `Afficher ${maskedScenes.length} scène${maskedScenes.length > 1 ? "s" : ""} masquée${maskedScenes.length > 1 ? "s" : ""}`}
-            </button>
+        <>
+          {typesPresent.length > 1 && (
+            <ul className="flex flex-wrap gap-x-3 gap-y-1 border-t border-line px-4 py-2 text-xs text-ink-muted" aria-label="Types de scène">
+              {typesPresent.map((type) => {
+                const { icon: Icon, label, color } = SCENE_TYPES[type];
+                return (
+                  <li key={type} className="inline-flex items-center gap-1">
+                    <Icon className={`h-3.5 w-3.5 ${color}`} aria-hidden="true" />
+                    {label}
+                  </li>
+                );
+              })}
+            </ul>
           )}
 
-          {scenesToDisplay.map((scene) => (
-            <SceneChip
-              key={scene.id}
-              scene={scene}
-              onScrollToScene={onScrollToScene}
-              onRegenerate={onRegenerate}
-              isRegenerating={regeneratingSceneId === scene.id}
-              isActive={activeSceneId === scene.id}
-              isInReport={renderedSet.has(scene.id)}
-            />
-          ))}
+          <div
+            id="scene-list"
+            ref={listRef}
+            className="max-h-80 min-h-0 flex-1 overflow-y-auto border-t border-line px-2 py-2 lg:max-h-none"
+          >
+            <ol className="space-y-0.5">
+              {shown.map((scene) => (
+                <SceneRow
+                  key={scene.id}
+                  scene={scene}
+                  onScrollToScene={onScrollToScene}
+                  onRegenerate={onRegenerate}
+                  isRegenerating={regeneratingSceneId === scene.id}
+                  regenerationBusy={regeneratingSceneId !== null}
+                  isActive={activeSceneId === scene.id}
+                  isInReport={renderedSet.has(scene.id)}
+                />
+              ))}
+            </ol>
 
-          {outOfReport > 0 && (
-            <button
-              onClick={() => void onRebuild()}
-              disabled={isRebuilding}
-              className="w-full mt-2 flex items-center justify-center gap-2 rounded-lg border-2 border-dashed border-amber-300 bg-amber-50/50 px-3 py-2 text-xs font-medium text-amber-700 hover:bg-amber-100/50 hover:border-amber-400 transition-all disabled:opacity-50"
-            >
-              {isRebuilding ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <Hammer className="h-3.5 w-3.5" />
-              )}
-              {isRebuilding
-                ? "Reconstruction..."
-                : `Reconstruire le rapport (${outOfReport} scène${outOfReport > 1 ? "s" : ""} manquante${outOfReport > 1 ? "s" : ""})`}
-            </button>
-          )}
-        </div>
+            {masked.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setShowMasked((prev) => !prev)}
+                className="btn-ghost btn-sm mt-1 w-full"
+              >
+                {showMasked ? <EyeOff className="h-4 w-4" aria-hidden="true" /> : <Eye className="h-4 w-4" aria-hidden="true" />}
+                {showMasked
+                  ? "Masquer les scènes hors jeu"
+                  : `Afficher ${plural(masked.length, "scène hors jeu", "scènes hors jeu")}`}
+              </button>
+            )}
+
+            {outOfReport > 0 && (
+              <button
+                type="button"
+                onClick={() => void onRebuild()}
+                disabled={isRebuilding}
+                className="btn mt-2 w-full border border-dashed border-warn/60 bg-warn-soft text-ink hover:border-warn"
+              >
+                {isRebuilding ? (
+                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                ) : (
+                  <Hammer className="h-4 w-4 text-warn" aria-hidden="true" />
+                )}
+                {isRebuilding
+                  ? "Reconstruction…"
+                  : `Reconstruire le rapport (${plural(outOfReport, "scène manquante", "scènes manquantes")})`}
+              </button>
+            )}
+          </div>
+
+          {footer && <div className="border-t border-line p-3">{footer}</div>}
+        </>
       )}
-    </div>
+    </nav>
   );
 }

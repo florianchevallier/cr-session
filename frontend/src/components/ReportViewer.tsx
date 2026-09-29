@@ -6,46 +6,102 @@ import {
   Copy,
   CheckCheck,
   Pencil,
-  X,
   Loader2,
   Send,
   Check,
   RefreshCw,
+  MapPin,
+  Dices,
+  Users,
+  NotebookPen,
+  Plus,
+  ArrowUp,
+  OctagonAlert,
 } from "lucide-react";
 import { useState, useCallback, useRef, useEffect, useMemo } from "react";
+import type { ReactNode } from "react";
 import SceneEditor from "./SceneEditor";
-import SceneBar from "./SceneBar";
+import SceneBar, { SCENE_TYPES } from "./SceneBar";
+import Modal from "./ui/Modal";
 import { fetchScenes, updateScene, regenerateScene, rebuildReport, type SceneWithSummary } from "../lib/api";
+import { formatDate, prefersReducedMotion, SHORTCUT_KEY } from "../lib/format";
+
+export interface ReportMeta {
+  universeLabel?: string;
+  createdAt?: string;
+  transcriptName?: string;
+  /** Coût Gemini de la génération, en dollars (absent pour les anciens rapports). */
+  costUsd?: number | null;
+}
 
 interface ReportViewerProps {
   report: string;
   reportId?: string | null;
+  meta?: ReportMeta;
   onCorrection?: (
     selectedText: string,
     instruction: string
   ) => Promise<void>;
   isCorrecting?: boolean;
   onReportUpdate?: (newReport: string) => void;
+  onNewSession?: () => void;
 }
 
-function getTextContent(node: React.ReactNode): string {
+type Toast = { type: "loading" | "success" | "error"; message: string } | null;
+
+const REMARK_PLUGINS = [remarkGfm];
+
+// Leading pictograms produced by the formatter, mapped to one icon family.
+const LABEL_ICONS: Array<[RegExp, typeof Dices]> = [
+  [/^🎲/u, Dices],
+  [/^👥/u, Users],
+  [/^📝/u, NotebookPen],
+  [/^📍/u, MapPin],
+];
+const LEADING_EMOJI = /^(\p{Extended_Pictographic}|\p{Emoji_Presentation})️?\s*/u;
+
+function getTextContent(node: ReactNode): string {
   if (typeof node === "string") return node;
   if (typeof node === "number") return String(node);
   if (!node) return "";
   if (Array.isArray(node)) return node.map(getTextContent).join("");
   if (typeof node === "object" && "props" in node) {
-    const el = node as React.ReactElement<{ children?: React.ReactNode }>;
+    const el = node as React.ReactElement<{ children?: ReactNode }>;
     return getTextContent(el.props.children);
   }
   return "";
 }
 
+/** Replace a leading emoji in the first text child with a proper icon. */
+function withIcon(children: ReactNode): { icon: typeof Dices | null; children: ReactNode } {
+  const list = Array.isArray(children) ? [...children] : [children];
+  const first = list[0];
+  if (typeof first !== "string" || !LEADING_EMOJI.test(first)) return { icon: null, children };
+  const icon = LABEL_ICONS.find(([re]) => re.test(first))?.[1] ?? null;
+  list[0] = first.replace(LEADING_EMOJI, "");
+  return { icon, children: list };
+}
+
+function parseTitle(report: string, universeLabel?: string): { raw: string | null; display: string } {
+  const match = report.match(/^#\s+(.+)$/m);
+  const raw = match ? match[1].trim() : null;
+  if (!raw) return { raw, display: universeLabel ?? "Compte-rendu de session" };
+  const rest = raw.replace(/^compte[- ]rendu de session\s*[:—–-]?\s*/i, "").trim();
+  if (!rest) return { raw, display: universeLabel ?? raw };
+  if (universeLabel && universeLabel.toLowerCase().startsWith(rest.toLowerCase())) {
+    return { raw, display: universeLabel };
+  }
+  return { raw, display: rest.charAt(0).toUpperCase() + rest.slice(1) };
+}
+
 export default function ReportViewer({
   report,
   reportId,
+  meta,
   onCorrection,
   isCorrecting = false,
   onReportUpdate,
+  onNewSession,
 }: ReportViewerProps) {
   const [copied, setCopied] = useState(false);
   const [selectedText, setSelectedText] = useState("");
@@ -56,14 +112,14 @@ export default function ReportViewer({
     top: number;
     left: number;
   } | null>(null);
-  const [showToast, setShowToast] = useState(false);
-  const [toastType, setToastType] = useState<"loading" | "success">("loading");
+  const [toast, setToast] = useState<Toast>(null);
+  const [showBackToTop, setShowBackToTop] = useState(false);
   const prevIsCorrecting = useRef(false);
   const reportBeforeCorrection = useRef<string | null>(null);
   const reportContentRef = useRef<HTMLDivElement>(null);
   const correctionButtonRef = useRef<HTMLDivElement>(null);
-  const correctionPanelRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const toastTimer = useRef<number | null>(null);
 
   // Scene editing state
   const [scenes, setScenes] = useState<SceneWithSummary[]>([]);
@@ -76,6 +132,20 @@ export default function ReportViewer({
   const [isRebuilding, setIsRebuilding] = useState(false);
   const [activeSceneId, setActiveSceneId] = useState<number | null>(null);
   const [renderedSceneIds, setRenderedSceneIds] = useState<number[]>([]);
+
+  const title = useMemo(() => parseTitle(report, meta?.universeLabel), [report, meta?.universeLabel]);
+
+  const notify = useCallback((next: Toast, autoHideMs?: number) => {
+    if (toastTimer.current) window.clearTimeout(toastTimer.current);
+    setToast(next);
+    if (next && autoHideMs) {
+      toastTimer.current = window.setTimeout(() => setToast(null), autoHideMs);
+    }
+  }, []);
+
+  useEffect(() => () => {
+    if (toastTimer.current) window.clearTimeout(toastTimer.current);
+  }, []);
 
   // ── Load scenes when reportId is available ────────────────────────────────
 
@@ -133,16 +203,13 @@ export default function ReportViewer({
       }
 
       setEditingSceneId(null);
-      setToastType("success");
-      setShowToast(true);
-      setTimeout(() => setShowToast(false), 3000);
+      notify({ type: "success", message: "Scène enregistrée." }, 3000);
     } catch (error) {
       console.error("Failed to save scene:", error);
-      alert(
-        error instanceof Error
-          ? error.message
-          : "Erreur lors de la sauvegarde de la scène."
-      );
+      notify({
+        type: "error",
+        message: error instanceof Error ? error.message : "Erreur lors de l'enregistrement de la scène.",
+      }, 6000);
     } finally {
       setIsSavingScene(false);
     }
@@ -156,9 +223,9 @@ export default function ReportViewer({
     if (!heading) return;
 
     setActiveSceneId(sceneId);
-    heading.scrollIntoView({ behavior: "smooth", block: "start" });
+    heading.scrollIntoView({ behavior: prefersReducedMotion() ? "auto" : "smooth", block: "start" });
     heading.classList.add("highlight-flash");
-    setTimeout(() => heading.classList.remove("highlight-flash"), 2000);
+    setTimeout(() => heading.classList.remove("highlight-flash"), 1600);
   }, []);
 
   const handleRegenerateScene = useCallback((sceneId: number) => {
@@ -166,6 +233,11 @@ export default function ReportViewer({
     setRegeneratePromptSceneId(sceneId);
     setRegenerateInstruction("");
   }, [reportId, regeneratingSceneId]);
+
+  const closeRegeneratePrompt = useCallback(() => {
+    setRegeneratePromptSceneId(null);
+    setRegenerateInstruction("");
+  }, []);
 
   const handleConfirmRegenerate = useCallback(async () => {
     if (!reportId || regeneratePromptSceneId === null || regeneratingSceneId !== null) return;
@@ -175,8 +247,7 @@ export default function ReportViewer({
     setRegeneratePromptSceneId(null);
     setRegenerateInstruction("");
     setRegeneratingSceneId(sceneId);
-    setToastType("loading");
-    setShowToast(true);
+    notify({ type: "loading", message: `Réécriture de la scène ${sceneId}…` });
 
     try {
       const result = await regenerateScene(reportId, sceneId, instruction || undefined);
@@ -193,26 +264,22 @@ export default function ReportViewer({
         )
       );
 
-      setToastType("success");
-      setTimeout(() => setShowToast(false), 3000);
+      notify({ type: "success", message: `Scène ${sceneId} réécrite.` }, 3000);
     } catch (error) {
       console.error("Failed to regenerate scene:", error);
-      setShowToast(false);
-      alert(
-        error instanceof Error
-          ? error.message
-          : "Erreur lors de la régénération de la scène."
-      );
+      notify({
+        type: "error",
+        message: error instanceof Error ? error.message : "Erreur lors de la régénération de la scène.",
+      }, 6000);
     } finally {
       setRegeneratingSceneId(null);
     }
-  }, [reportId, regeneratePromptSceneId, regenerateInstruction, regeneratingSceneId, onReportUpdate]);
+  }, [reportId, regeneratePromptSceneId, regenerateInstruction, regeneratingSceneId, onReportUpdate, notify]);
 
   const handleRebuild = useCallback(async () => {
     if (!reportId || isRebuilding) return;
     setIsRebuilding(true);
-    setToastType("loading");
-    setShowToast(true);
+    notify({ type: "loading", message: "Reconstruction du rapport…" });
 
     try {
       const result = await rebuildReport(reportId);
@@ -221,46 +288,49 @@ export default function ReportViewer({
         onReportUpdate(result.reportMd);
       }
 
-      setToastType("success");
-      setTimeout(() => setShowToast(false), 3000);
+      notify({ type: "success", message: "Rapport reconstruit." }, 3000);
     } catch (error) {
       console.error("Failed to rebuild report:", error);
-      setShowToast(false);
-      alert(
-        error instanceof Error
-          ? error.message
-          : "Erreur lors de la reconstruction du rapport."
-      );
+      notify({
+        type: "error",
+        message: error instanceof Error ? error.message : "Erreur lors de la reconstruction du rapport.",
+      }, 6000);
     } finally {
       setIsRebuilding(false);
     }
-  }, [reportId, isRebuilding, onReportUpdate]);
+  }, [reportId, isRebuilding, onReportUpdate, notify]);
 
   const handleDownload = () => {
     const blob = new Blob([report], { type: "text/markdown;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
+    const date = meta?.createdAt
+      ? new Date(meta.createdAt.replace(" ", "T") + (meta.createdAt.includes("T") ? "" : "Z"))
+      : new Date();
+    const day = Number.isNaN(date.getTime()) ? new Date() : date;
     a.href = url;
-    a.download = `cr-session-${new Date().toISOString().split("T")[0]}.md`;
+    a.download = `cr-session-${day.toISOString().split("T")[0]}.md`;
     a.click();
     URL.revokeObjectURL(url);
   };
 
   const handleCopy = async () => {
-    await navigator.clipboard.writeText(report);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    try {
+      await navigator.clipboard.writeText(report);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      notify({ type: "error", message: "Impossible de copier : le navigateur a refusé l'accès au presse-papiers." }, 5000);
+    }
   };
 
   // ── Text selection handling ────────────────────────────────────────────────
 
-  const handleMouseUp = useCallback(
-    (e: MouseEvent) => {
+  const handleSelectionEnd = useCallback(
+    (e: Event) => {
       if (!onCorrection || isCorrecting || showCorrectionPanel) return;
 
-      if (
-        correctionButtonRef.current?.contains(e.target as Node)
-      ) {
+      if (correctionButtonRef.current?.contains(e.target as Node)) {
         return;
       }
 
@@ -284,13 +354,12 @@ export default function ReportViewer({
         reportContentRef.current.contains(range.commonAncestorContainer)
       ) {
         const rect = range.getBoundingClientRect();
-        const containerRect =
-          reportContentRef.current.getBoundingClientRect();
+        const containerRect = reportContentRef.current.getBoundingClientRect();
+        const left = rect.left - containerRect.left + rect.width / 2;
         setSelectedText(text);
         setSelectionPosition({
           top: rect.top - containerRect.top + rect.height + 8,
-          left:
-            rect.left - containerRect.left + rect.width / 2,
+          left: Math.min(Math.max(left, 64), containerRect.width - 64),
         });
       }
     },
@@ -298,10 +367,21 @@ export default function ReportViewer({
   );
 
   useEffect(() => {
-    document.addEventListener("mouseup", handleMouseUp);
-    return () =>
-      document.removeEventListener("mouseup", handleMouseUp);
-  }, [handleMouseUp]);
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.shiftKey || e.key === "Shift") handleSelectionEnd(e);
+    };
+    const onTouchEnd = (e: TouchEvent) => {
+      window.setTimeout(() => handleSelectionEnd(e), 300);
+    };
+    document.addEventListener("mouseup", handleSelectionEnd);
+    document.addEventListener("keyup", onKeyUp);
+    document.addEventListener("touchend", onTouchEnd);
+    return () => {
+      document.removeEventListener("mouseup", handleSelectionEnd);
+      document.removeEventListener("keyup", onKeyUp);
+      document.removeEventListener("touchend", onTouchEnd);
+    };
+  }, [handleSelectionEnd]);
 
   // ── CSS Highlight API for selected/correcting text ─────────────────────────
 
@@ -360,16 +440,10 @@ export default function ReportViewer({
 
       const nodeLen = node.textContent?.length || 0;
       if (!rangeStartSet) {
-        range.setStart(
-          node,
-          Math.max(0, matchIndex - start)
-        );
+        range.setStart(node, Math.max(0, matchIndex - start));
         rangeStartSet = true;
       }
-      range.setEnd(
-        node,
-        Math.min(matchEnd - start, nodeLen)
-      );
+      range.setEnd(node, Math.min(matchEnd - start, nodeLen));
     }
 
     if (rangeStartSet) {
@@ -387,23 +461,18 @@ export default function ReportViewer({
   useEffect(() => {
     if (isCorrecting && !prevIsCorrecting.current) {
       reportBeforeCorrection.current = report;
-      setToastType("loading");
-      setShowToast(true);
+      notify({ type: "loading", message: "Correction en cours…" });
     }
     if (prevIsCorrecting.current && !isCorrecting) {
       const reportChanged = report !== reportBeforeCorrection.current;
       if (reportChanged) {
-        setToastType("success");
-        const timer = setTimeout(() => {
-          setShowToast(false);
-        }, 3000);
-        return () => clearTimeout(timer);
+        notify({ type: "success", message: "Correction appliquée." }, 3000);
       } else {
-        setShowToast(false);
+        notify(null);
       }
     }
     prevIsCorrecting.current = isCorrecting;
-  }, [isCorrecting, report]);
+  }, [isCorrecting, report, notify]);
 
   // ── Auto-focus textarea when panel opens ───────────────────────────────────
 
@@ -425,8 +494,7 @@ export default function ReportViewer({
     const handleEscape = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         if (regeneratePromptSceneId !== null) {
-          setRegeneratePromptSceneId(null);
-          setRegenerateInstruction("");
+          closeRegeneratePrompt();
         } else if (showCorrectionPanel && !isCorrecting) {
           handleCloseCorrectionPanel();
         } else if (editingSceneId && !isSavingScene) {
@@ -439,7 +507,7 @@ export default function ReportViewer({
       document.addEventListener("keydown", handleEscape);
       return () => document.removeEventListener("keydown", handleEscape);
     }
-  }, [showCorrectionPanel, isCorrecting, editingSceneId, isSavingScene, regeneratePromptSceneId]);
+  }, [showCorrectionPanel, isCorrecting, editingSceneId, isSavingScene, regeneratePromptSceneId, closeRegeneratePrompt]);
 
   // ── Handlers ───────────────────────────────────────────────────────────────
 
@@ -456,12 +524,7 @@ export default function ReportViewer({
   };
 
   const handleSubmitCorrection = async () => {
-    if (
-      !onCorrection ||
-      !selectedText ||
-      !correctionInstruction.trim()
-    )
-      return;
+    if (!onCorrection || !selectedText || !correctionInstruction.trim()) return;
 
     const textToCorrect = selectedText;
     const instruction = correctionInstruction.trim();
@@ -483,11 +546,11 @@ export default function ReportViewer({
       correctionInstruction.trim()
     ) {
       e.preventDefault();
-      handleSubmitCorrection();
+      void handleSubmitCorrection();
     }
   };
 
-  // ── Custom ReactMarkdown components for scene edit buttons ─────────────────
+  // ── Scene tracking ─────────────────────────────────────────────────────────
 
   const narrativeScenes = useMemo(
     () => scenes.filter((s) => s.type !== "meta" && s.type !== "pause"),
@@ -498,7 +561,6 @@ export default function ReportViewer({
     if (narrativeScenes.length === 0) {
       setActiveSceneId(null);
       setRenderedSceneIds([]);
-      return;
     }
   }, [narrativeScenes]);
 
@@ -540,24 +602,27 @@ export default function ReportViewer({
   }, [renderedSceneIds]);
 
   useEffect(() => {
-    if (!reportContentRef.current || narrativeScenes.length === 0) return;
-
-    const headings = Array.from(
-      reportContentRef.current.querySelectorAll<HTMLElement>("h2[data-scene-id]")
-    );
-    if (headings.length === 0) return;
-
     let ticking = false;
 
-    const updateActiveScene = () => {
+    const update = () => {
       ticking = false;
+      setShowBackToTop((prev) => {
+        const next = window.scrollY > 1400;
+        return prev === next ? prev : next;
+      });
+
+      const container = reportContentRef.current;
+      if (!container || narrativeScenes.length === 0) return;
+      // Query on every tick: headings are re-created when the report or the
+      // editing state changes, so a cached list would point to detached nodes.
+      const headings = container.querySelectorAll<HTMLElement>("h2[data-scene-id]");
+      if (headings.length === 0) return;
+
       const threshold = 140;
       let nextSceneId: number | null = null;
-
       for (const heading of headings) {
         const sceneId = Number(heading.dataset.sceneId);
         if (Number.isNaN(sceneId)) continue;
-
         if (heading.getBoundingClientRect().top - threshold <= 0) {
           nextSceneId = sceneId;
         } else {
@@ -578,10 +643,10 @@ export default function ReportViewer({
     const onScroll = () => {
       if (ticking) return;
       ticking = true;
-      window.requestAnimationFrame(updateActiveScene);
+      window.requestAnimationFrame(update);
     };
 
-    updateActiveScene();
+    update();
     window.addEventListener("scroll", onScroll, { passive: true });
     window.addEventListener("resize", onScroll);
 
@@ -589,7 +654,7 @@ export default function ReportViewer({
       window.removeEventListener("scroll", onScroll);
       window.removeEventListener("resize", onScroll);
     };
-  }, [report, narrativeScenes]);
+  }, [report, narrativeScenes, editingSceneId]);
 
   const editingScene = editingSceneId
     ? scenes.find((s) => s.id === editingSceneId)
@@ -608,10 +673,17 @@ export default function ReportViewer({
     isSaving: isSavingScene,
   };
 
+  // ── Markdown renderers ─────────────────────────────────────────────────────
+
   const markdownComponents = useMemo<Components>(() => {
     const renderState = { suppress: false };
 
     return {
+      h1: ({ children, ...props }) => {
+        // The report title is shown in the page header; don't repeat it.
+        if (getTextContent(children).trim() === title.raw) return null;
+        return <h2 {...props}>{children}</h2>;
+      },
       h2: ({ children, ...props }) => {
         renderState.suppress = false;
 
@@ -621,15 +693,21 @@ export default function ReportViewer({
         if (!scene) {
           return <h2 {...props}>{children}</h2>;
         }
-
-        const baseClassName = typeof props.className === "string" ? props.className : "";
-        const headingClassName = [
-          baseClassName,
-          "scroll-mt-28",
-          reportId && !editingSceneId ? "group/heading" : "",
-        ]
-          .filter(Boolean)
-          .join(" ");
+        const type = SCENE_TYPES[scene.type] ?? SCENE_TYPES.narrative;
+        const TypeIcon = type.icon;
+        const eyebrow = (
+          <p className="!mb-0 mt-12 flex items-center gap-1.5 font-sans text-sm text-ink-muted" aria-hidden="true">
+            <TypeIcon className={`h-3.5 w-3.5 ${type.color}`} />
+            Scène {scene.id} · {type.label}
+          </p>
+        );
+        const headingProps = {
+          ...props,
+          id: `scene-${scene.id}`,
+          "data-scene-id": scene.id,
+          className: "scene-heading !mt-1 flex items-start justify-between gap-4",
+          style: { scrollMarginTop: "2.5rem" },
+        };
 
         if (editingSceneId === scene.id) {
           renderState.suppress = true;
@@ -637,13 +715,9 @@ export default function ReportViewer({
 
           return (
             <>
-              <h2
-                {...props}
-                id={`scene-${scene.id}`}
-                data-scene-id={scene.id}
-                className={[baseClassName, "scroll-mt-28"].filter(Boolean).join(" ")}
-              >
-                {children}
+              {eyebrow}
+              <h2 {...headingProps}>
+                <span>{children}</span>
               </h2>
               {es?.summary && (
                 <SceneEditor
@@ -658,45 +732,58 @@ export default function ReportViewer({
           );
         }
 
-        if (!reportId || editingSceneId) {
-          return (
-            <h2
-              {...props}
-              id={`scene-${scene.id}`}
-              data-scene-id={scene.id}
-              className={headingClassName}
-            >
-              {children}
-            </h2>
-          );
-        }
-
         return (
-          <h2
-            {...props}
-            id={`scene-${scene.id}`}
-            data-scene-id={scene.id}
-            className={headingClassName}
-            style={{ position: "relative" }}
-          >
-            {children}
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                setEditingSceneId(scene.id);
-              }}
-              className="absolute right-0 top-1/2 -translate-y-1/2 opacity-0 group-hover/heading:opacity-100 transition-all duration-200 rounded-lg bg-amber-600 hover:bg-amber-700 text-white px-2.5 py-1.5 shadow-lg flex items-center gap-1.5 text-xs font-medium"
-              aria-label={`Éditer ${scene.title}`}
-            >
-              <Pencil className="h-3 w-3" />
-              Éditer
-            </button>
-          </h2>
+          <>
+            {eyebrow}
+            <h2 {...headingProps}>
+              <span>{children}</span>
+              {reportId && !editingSceneId && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setEditingSceneId(scene.id);
+                  }}
+                  className="scene-heading-action btn-secondary btn-sm mt-1 shrink-0 font-sans"
+                  aria-label={`Modifier la scène ${scene.id} : ${scene.title}`}
+                >
+                  <Pencil className="h-4 w-4" aria-hidden="true" />
+                  <span className="hidden sm:inline">Modifier</span>
+                </button>
+              )}
+            </h2>
+          </>
         );
       },
       p: ({ children, ...props }) => {
         if (renderState.suppress) return null;
+
+        // "*📍 Lieu*" line right under a scene title.
+        const only = Array.isArray(children) && children.length === 1 ? children[0] : children;
+        const text = getTextContent(children).trim();
+        if (text.startsWith("📍") && typeof only === "object") {
+          return (
+            <p className="scene-location">
+              <MapPin className="h-4 w-4 shrink-0 text-accent-ink" aria-hidden="true" />
+              <span>
+                <span className="sr-only">Lieu : </span>
+                {text.replace(LEADING_EMOJI, "")}
+              </span>
+            </p>
+          );
+        }
+
         return <p {...props}>{children}</p>;
+      },
+      strong: ({ children, ...props }) => {
+        const { icon: Icon, children: rest } = withIcon(children);
+        if (!Icon) return <strong {...props}>{rest}</strong>;
+        return (
+          <strong {...props} className="box-label">
+            <Icon aria-hidden="true" />
+            {rest}
+          </strong>
+        );
       },
       blockquote: ({ children, ...props }) => {
         if (renderState.suppress) return null;
@@ -710,266 +797,227 @@ export default function ReportViewer({
         if (renderState.suppress) return null;
         return <ol {...props}>{children}</ol>;
       },
-      hr: (props) => {
+      table: ({ children, ...props }) => (
+        <div className="overflow-x-auto">
+          <table {...props}>{children}</table>
+        </div>
+      ),
+      hr: () => {
         renderState.suppress = false;
-        return <hr {...props} />;
+        return <hr aria-hidden="true" />;
       },
     };
-  }, [narrativeScenes, reportId, editingSceneId]);
+  }, [narrativeScenes, reportId, editingSceneId, title.raw]);
+
+  // Memoized so scroll-driven state (active scene, back-to-top) never
+  // re-renders the whole report.
+  const renderedMarkdown = useMemo(
+    () => (
+      <ReactMarkdown remarkPlugins={REMARK_PLUGINS} components={markdownComponents}>
+        {report}
+      </ReactMarkdown>
+    ),
+    // editingScene / isSavingScene are read through inlineEditRef, listed so
+    // the inline editor still refreshes.
+    [report, markdownComponents, editingScene, isSavingScene]
+  );
+
+  const promptScene =
+    regeneratePromptSceneId !== null ? scenes.find((s) => s.id === regeneratePromptSceneId) : null;
+
+  const copyButton = (compact = false) => (
+    <button type="button" onClick={() => void handleCopy()} className={`btn-secondary btn-sm ${compact ? "flex-1" : ""}`}>
+      {copied ? <CheckCheck className="h-4 w-4 text-ok" aria-hidden="true" /> : <Copy className="h-4 w-4" aria-hidden="true" />}
+      <span aria-live="polite">{copied ? "Copié" : "Copier"}</span>
+    </button>
+  );
+
+  const downloadButton = (compact = false) => (
+    <button type="button" onClick={handleDownload} className={`btn-secondary btn-sm ${compact ? "flex-1" : ""}`}>
+      <Download className="h-4 w-4" aria-hidden="true" />
+      {compact ? ".md" : "Télécharger (.md)"}
+    </button>
+  );
+
+  // A title that only repeats the universe says nothing: name the session by its date.
+  const genericTitle = !!meta?.universeLabel && title.display === meta.universeLabel;
+  const heading =
+    genericTitle && meta?.createdAt ? `Session du ${formatDate(meta.createdAt)}` : title.display;
+  const metaParts = [
+    meta?.universeLabel,
+    !genericTitle && meta?.createdAt ? formatDate(meta.createdAt) : null,
+    narrativeScenes.length > 0 ? `${narrativeScenes.length} scènes` : null,
+    meta?.transcriptName,
+    typeof meta?.costUsd === "number" ? `coût ≈ ${meta.costUsd.toFixed(meta.costUsd < 1 ? 3 : 2)} $` : null,
+  ].filter(Boolean);
 
   return (
-    <div className="space-y-4">
-      {/* Toast notification (top right) */}
-      {showToast && (
-        <div className="fixed top-4 right-4 z-50 animate-slide-in">
+    <div>
+      {/* Status toast */}
+      <div
+        className="pointer-events-none fixed inset-x-4 bottom-4 z-50 flex justify-center sm:inset-x-auto sm:right-6 sm:top-6 sm:bottom-auto"
+        role={toast?.type === "error" ? "alert" : "status"}
+        aria-live={toast?.type === "error" ? "assertive" : "polite"}
+      >
+        {toast && (
           <div
-            className={`card px-4 py-3 shadow-lg border-2 flex items-center gap-3 min-w-[280px] ${
-              toastType === "success"
-                ? "border-green-400 bg-green-50/95"
-                : "border-amber-400 bg-amber-50/95"
+            className={`pointer-events-auto flex max-w-sm items-start gap-3 rounded-xl border bg-surface px-4 py-3 shadow-raised animate-rise-in ${
+              toast.type === "error" ? "border-danger/40" : toast.type === "success" ? "border-ok/40" : "border-line-strong"
             }`}
           >
-            {toastType === "loading" ? (
-              <>
-                <Loader2 className="h-5 w-5 text-amber-600 animate-spin flex-shrink-0" />
-                <span className="text-sm font-medium text-amber-900">
-                  {isRebuilding
-                    ? "Reconstruction du rapport..."
-                    : regeneratingSceneId !== null
-                      ? "Régénération de la scène en cours..."
-                      : isSavingScene
-                        ? "Sauvegarde et mise à jour des métadonnées..."
-                        : "Correction en cours..."}
-                </span>
-              </>
-            ) : (
-              <>
-                <div className="flex h-6 w-6 items-center justify-center rounded-full bg-green-100 flex-shrink-0">
-                  <Check className="h-4 w-4 text-green-600" />
-                </div>
-                <span className="text-sm font-medium text-green-800">
-                  {isRebuilding
-                    ? "Rapport reconstruit !"
-                    : regeneratingSceneId !== null
-                      ? "Scène régénérée !"
-                      : isSavingScene
-                        ? "Scène sauvegardée !"
-                        : "Correction appliquée !"}
-                </span>
-              </>
+            {toast.type === "loading" && <Loader2 className="mt-0.5 h-5 w-5 shrink-0 animate-spin text-accent-ink" aria-hidden="true" />}
+            {toast.type === "success" && (
+              <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-ok text-surface" aria-hidden="true">
+                <Check className="h-3.5 w-3.5" strokeWidth={3} />
+              </span>
+            )}
+            {toast.type === "error" && <OctagonAlert className="mt-0.5 h-5 w-5 shrink-0 text-danger" aria-hidden="true" />}
+            <p className="text-sm font-medium text-ink">{toast.message}</p>
+            {toast.type === "error" && (
+              <button type="button" onClick={() => notify(null)} className="-mr-1 text-sm font-medium text-ink-muted underline underline-offset-2 hover:text-ink">
+                Fermer
+              </button>
             )}
           </div>
-        </div>
-      )}
-
-      {/* Actions bar */}
-      <div className="flex items-center justify-between">
-        <h2 className="text-lg font-bold text-parchment-900">
-          Compte-Rendu de Session
-        </h2>
-        <div className="flex gap-2">
-          <button
-            onClick={handleCopy}
-            className="btn-secondary text-xs"
-          >
-            {copied ? (
-              <CheckCheck className="h-3.5 w-3.5 text-green-600" />
-            ) : (
-              <Copy className="h-3.5 w-3.5" />
-            )}
-            {copied ? "Copié !" : "Copier"}
-          </button>
-          <button
-            onClick={handleDownload}
-            className="btn-primary text-xs"
-          >
-            <Download className="h-3.5 w-3.5" />
-            Télécharger .md
-          </button>
-        </div>
+        )}
       </div>
 
-      {/* Correction modal */}
-      {showCorrectionPanel && (
-        <>
-          <div
-            className="fixed inset-0 bg-black/20 backdrop-blur-sm z-40 animate-fade-in"
-            onClick={!isCorrecting ? handleCloseCorrectionPanel : undefined}
-          />
+      {/* Report header */}
+      <header className="mb-6 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+        <div className="min-w-0">
+          <h1 className="text-xl font-semibold text-ink">{heading}</h1>
+          {metaParts.length > 0 && (
+            <p className="mt-0.5 text-sm text-ink-muted">{metaParts.join(" · ")}</p>
+          )}
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {copyButton()}
+          {downloadButton()}
+          {onNewSession && (
+            <button type="button" onClick={onNewSession} className="btn-primary btn-sm">
+              <Plus className="h-4 w-4" aria-hidden="true" />
+              Nouvelle session
+            </button>
+          )}
+        </div>
+      </header>
 
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 pointer-events-none">
-            <div
-              ref={correctionPanelRef}
-              className="card w-full max-w-xl p-6 border-2 border-amber-300 bg-amber-50/95 backdrop-blur-md pointer-events-auto animate-scale-in shadow-2xl"
-            >
-              <div className="flex items-start justify-between mb-4">
-                <div className="flex items-center gap-2">
-                  <Pencil className="h-5 w-5 text-amber-700" />
-                  <h3 className="text-base font-semibold text-amber-900">
-                    Demande de correction
-                  </h3>
-                </div>
-                <button
-                  onClick={handleCloseCorrectionPanel}
-                  className="p-1.5 rounded-md hover:bg-amber-200/60 text-amber-700 transition-colors"
-                  aria-label="Fermer"
-                >
-                  <X className="h-5 w-5" />
-                </button>
-              </div>
-
-              <div className="mb-4">
-                <p className="text-xs font-medium text-amber-700 mb-2">
-                  Texte sélectionné :
-                </p>
-                <div className="bg-white/90 rounded-lg p-3 text-sm text-parchment-800 border border-amber-200 max-h-32 overflow-y-auto italic shadow-sm">
-                  « {selectedText} »
-                </div>
-              </div>
-
-              <div className="mb-4">
-                <label
-                  htmlFor="correction-instruction"
-                  className="block text-xs font-medium text-amber-700 mb-2"
-                >
-                  Quelle correction apporter ?
-                </label>
-                <textarea
-                  ref={textareaRef}
-                  id="correction-instruction"
-                  value={correctionInstruction}
-                  onChange={(e) =>
-                    setCorrectionInstruction(e.target.value)
-                  }
-                  onKeyDown={handleKeyDown}
-                  placeholder="Ex: Ce n'est pas Yumi qui lance le sort mais Kael..."
-                  className="w-full rounded-lg border border-amber-200 bg-white/90 px-3 py-2.5 text-sm text-parchment-800 placeholder-parchment-400 focus:border-amber-400 focus:outline-none focus:ring-2 focus:ring-amber-300/50 resize-y shadow-sm"
-                  rows={4}
-                />
-                <p className="mt-2 text-[11px] text-amber-600">
-                  {navigator.platform.includes("Mac")
-                    ? "⌘"
-                    : "Ctrl"}
-                  +Entrée pour envoyer
-                </p>
-              </div>
-
-              <div className="flex justify-end gap-2">
-                <button
-                  onClick={handleCloseCorrectionPanel}
-                  className="btn-secondary text-sm"
-                >
-                  Annuler
-                </button>
-                <button
-                  onClick={handleSubmitCorrection}
-                  disabled={!correctionInstruction.trim()}
-                  className="btn-primary text-sm"
-                >
-                  <Send className="h-4 w-4" />
-                  Appliquer
-                </button>
-              </div>
-            </div>
-          </div>
-        </>
+      {onCorrection && (
+        <p className="mb-6 text-sm text-ink-muted lg:hidden">
+          Astuce : sélectionne un passage du récit pour demander une correction.
+        </p>
       )}
 
-      {/* Regeneration instruction modal */}
-      {regeneratePromptSceneId !== null && (() => {
-        const promptScene = scenes.find((s) => s.id === regeneratePromptSceneId);
-        return (
-          <>
-            <div
-              className="fixed inset-0 bg-black/20 backdrop-blur-sm z-40 animate-fade-in"
-              onClick={() => { setRegeneratePromptSceneId(null); setRegenerateInstruction(""); }}
-            />
-            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 pointer-events-none">
-              <div className="card w-full max-w-xl p-6 border-2 border-amber-300 bg-amber-50/95 backdrop-blur-md pointer-events-auto animate-scale-in shadow-2xl">
-                <div className="flex items-start justify-between mb-4">
-                  <div className="flex items-center gap-2">
-                    <RefreshCw className="h-5 w-5 text-amber-700" />
-                    <h3 className="text-base font-semibold text-amber-900">
-                      Régénérer la scène
-                    </h3>
-                  </div>
-                  <button
-                    onClick={() => { setRegeneratePromptSceneId(null); setRegenerateInstruction(""); }}
-                    className="p-1.5 rounded-md hover:bg-amber-200/60 text-amber-700 transition-colors"
-                    aria-label="Fermer"
-                  >
-                    <X className="h-5 w-5" />
-                  </button>
-                </div>
+      {/* Correction dialog */}
+      {showCorrectionPanel && (
+        <Modal
+          title="Corriger un passage"
+          icon={<Pencil className="h-5 w-5" />}
+          onClose={handleCloseCorrectionPanel}
+          closeDisabled={isCorrecting}
+          footer={
+            <>
+              <button type="button" onClick={handleCloseCorrectionPanel} className="btn-secondary">
+                Annuler
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleSubmitCorrection()}
+                disabled={!correctionInstruction.trim()}
+                className="btn-primary"
+              >
+                <Send className="h-4 w-4" aria-hidden="true" />
+                Appliquer la correction
+              </button>
+            </>
+          }
+        >
+          <p className="mb-2 text-sm font-medium text-ink">Passage sélectionné</p>
+          <blockquote className="mb-5 max-h-32 overflow-y-auto rounded-lg border-l-[3px] border-line-strong bg-sunken px-4 py-3 font-serif text-base italic text-ink">
+            « {selectedText} »
+          </blockquote>
+          <label htmlFor="correction-instruction" className="label">
+            Que faut-il corriger ?
+          </label>
+          <textarea
+            ref={textareaRef}
+            id="correction-instruction"
+            value={correctionInstruction}
+            onChange={(e) => setCorrectionInstruction(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder="Ex. : ce n'est pas Yumi qui lance le sort mais Kael…"
+            className="textarea"
+            rows={4}
+            aria-describedby="correction-hint"
+          />
+          <p id="correction-hint" className="mt-2 text-sm text-ink-muted">
+            {SHORTCUT_KEY}+Entrée pour envoyer
+          </p>
+        </Modal>
+      )}
 
-                {promptScene && (
-                  <div className="mb-4">
-                    <div className="bg-white/90 rounded-lg px-3 py-2 text-sm text-parchment-800 border border-amber-200 shadow-sm">
-                      <span className="font-semibold">Scène {promptScene.id}</span>
-                      <span className="mx-1.5 text-parchment-400">·</span>
-                      <span>{promptScene.title}</span>
-                    </div>
-                  </div>
-                )}
-
-                <div className="mb-4">
-                  <label
-                    htmlFor="regenerate-instruction"
-                    className="block text-xs font-medium text-amber-700 mb-2"
-                  >
-                    Que souhaitez-vous changer ou améliorer ?
-                  </label>
-                  <textarea
-                    ref={regenerateTextareaRef}
-                    id="regenerate-instruction"
-                    value={regenerateInstruction}
-                    onChange={(e) => setRegenerateInstruction(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-                        e.preventDefault();
-                        void handleConfirmRegenerate();
-                      }
-                    }}
-                    placeholder="Ex: Le MJ ne devrait pas apparaître dans le récit, c'est Stan qui explique ce point, pas le MJ..."
-                    className="w-full rounded-lg border border-amber-200 bg-white/90 px-3 py-2.5 text-sm text-parchment-800 placeholder-parchment-400 focus:border-amber-400 focus:outline-none focus:ring-2 focus:ring-amber-300/50 resize-y shadow-sm"
-                    rows={3}
-                  />
-                  <p className="mt-2 text-[11px] text-amber-600">
-                    {navigator.platform.includes("Mac") ? "⌘" : "Ctrl"}+Entrée pour régénérer · Laissez vide pour une simple régénération
-                  </p>
-                </div>
-
-                <div className="flex justify-end gap-2">
-                  <button
-                    onClick={() => { setRegeneratePromptSceneId(null); setRegenerateInstruction(""); }}
-                    className="btn-secondary text-sm"
-                  >
-                    Annuler
-                  </button>
-                  <button
-                    onClick={() => void handleConfirmRegenerate()}
-                    className="btn-primary text-sm"
-                  >
-                    <RefreshCw className="h-4 w-4" />
-                    Régénérer
-                  </button>
-                </div>
-              </div>
-            </div>
-          </>
-        );
-      })()}
+      {/* Regeneration dialog */}
+      {regeneratePromptSceneId !== null && (
+        <Modal
+          title="Réécrire la scène"
+          icon={<RefreshCw className="h-5 w-5" />}
+          onClose={closeRegeneratePrompt}
+          footer={
+            <>
+              <button type="button" onClick={closeRegeneratePrompt} className="btn-secondary">
+                Annuler
+              </button>
+              <button type="button" onClick={() => void handleConfirmRegenerate()} className="btn-primary">
+                <RefreshCw className="h-4 w-4" aria-hidden="true" />
+                Réécrire la scène
+              </button>
+            </>
+          }
+        >
+          {promptScene && (
+            <p className="mb-5 rounded-lg bg-sunken px-4 py-3 text-sm text-ink">
+              <span className="font-semibold">Scène {promptScene.id}</span>
+              <span className="mx-1.5 text-ink-muted" aria-hidden="true">·</span>
+              {promptScene.title}
+            </p>
+          )}
+          <p className="mb-4 text-sm text-ink-muted">
+            Le texte actuel de la scène sera remplacé.
+          </p>
+          <label htmlFor="regenerate-instruction" className="label">
+            Que faut-il changer ? <span className="font-normal text-ink-muted">(facultatif)</span>
+          </label>
+          <textarea
+            ref={regenerateTextareaRef}
+            id="regenerate-instruction"
+            value={regenerateInstruction}
+            onChange={(e) => setRegenerateInstruction(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                e.preventDefault();
+                void handleConfirmRegenerate();
+              }
+            }}
+            placeholder="Ex. : le MJ ne doit pas apparaître dans le récit, c'est Stan qui explique ce point…"
+            className="textarea"
+            rows={3}
+            aria-describedby="regenerate-hint"
+          />
+          <p id="regenerate-hint" className="mt-2 text-sm text-ink-muted">
+            {SHORTCUT_KEY}+Entrée pour lancer · laisse vide pour une simple réécriture
+          </p>
+        </Modal>
+      )}
 
       <div
         className={
           scenes.length > 0
-            ? "space-y-4 lg:grid lg:grid-cols-[18rem_minmax(0,1fr)] lg:items-start lg:gap-5 lg:space-y-0"
+            ? "space-y-5 lg:grid lg:grid-cols-[19rem_minmax(0,1fr)] lg:items-start lg:gap-8 lg:space-y-0"
             : ""
         }
       >
-        {/* Scene navigation bar */}
         {scenes.length > 0 && (
-          <aside className="lg:sticky lg:top-6 lg:max-h-[calc(100vh-3rem)]">
+          <aside className="lg:sticky lg:top-6 lg:h-[calc(100vh-3rem)]">
             <SceneBar
               scenes={scenes}
               renderedSceneIds={renderedSceneIds}
@@ -979,50 +1027,73 @@ export default function ReportViewer({
               regeneratingSceneId={regeneratingSceneId}
               isRebuilding={isRebuilding}
               activeSceneId={activeSceneId}
+              footer={
+                <div className="hidden gap-2 lg:flex">
+                  {copyButton(true)}
+                  {downloadButton(true)}
+                </div>
+              }
             />
           </aside>
         )}
 
-        {/* Report content */}
-        <div
-          className="card p-8 prose-report relative"
-          ref={reportContentRef}
+        <article
+          aria-label="Compte-rendu"
+          className="card relative px-5 py-6 sm:px-8 sm:py-8"
         >
-          <ReactMarkdown
-            remarkPlugins={[remarkGfm]}
-            components={markdownComponents}
-          >
-            {report}
-          </ReactMarkdown>
+          <div className="prose-report" ref={reportContentRef}>
+            {renderedMarkdown}
+          </div>
 
           {/* Floating correction button */}
-          {selectedText &&
-            selectionPosition &&
-            !showCorrectionPanel &&
-            onCorrection && (
-              <div
-                ref={correctionButtonRef}
-                className="absolute z-50"
-                style={{
-                  top: `${selectionPosition.top}px`,
-                  left: `${selectionPosition.left}px`,
-                  transform: "translateX(-50%)",
-                }}
-              >
-                <div className="correction-button-container">
-                  <div className="correction-button-arrow" />
-                  <button
-                    onClick={handleOpenCorrectionPanel}
-                    className="flex items-center gap-1.5 rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-medium text-white shadow-lg hover:bg-amber-700 active:scale-95 transition-all"
-                  >
-                    <Pencil className="h-3 w-3" />
-                    Corriger
-                  </button>
-                </div>
+          {selectedText && selectionPosition && !showCorrectionPanel && onCorrection && (
+            <div
+              ref={correctionButtonRef}
+              className="absolute z-40"
+              style={{
+                top: `${selectionPosition.top + (reportContentRef.current?.offsetTop ?? 0)}px`,
+                left: `${selectionPosition.left + (reportContentRef.current?.offsetLeft ?? 0)}px`,
+                transform: "translateX(-50%)",
+              }}
+            >
+              <div className="correction-button-container">
+                <div className="correction-button-arrow" />
+                <button
+                  type="button"
+                  onClick={handleOpenCorrectionPanel}
+                  className="btn-primary btn-sm shadow-raised"
+                >
+                  <Pencil className="h-4 w-4" aria-hidden="true" />
+                  Corriger ce passage
+                </button>
               </div>
-            )}
-        </div>
+            </div>
+          )}
+
+          <footer className="mx-auto mt-12 max-w-[42rem] border-t border-line pt-6">
+            <div className="flex flex-wrap justify-end gap-2">
+              {downloadButton()}
+              {onNewSession && (
+                <button type="button" onClick={onNewSession} className="btn-primary btn-sm">
+                  <Plus className="h-4 w-4" aria-hidden="true" />
+                  Nouvelle session
+                </button>
+              )}
+            </div>
+          </footer>
+        </article>
       </div>
+
+      {showBackToTop && (
+        <button
+          type="button"
+          onClick={() => window.scrollTo({ top: 0, behavior: prefersReducedMotion() ? "auto" : "smooth" })}
+          className="icon-btn fixed bottom-5 right-5 z-30 h-12 w-12 rounded-full border border-line-strong bg-surface shadow-raised animate-fade-in lg:hidden"
+          aria-label="Revenir en haut du compte-rendu"
+        >
+          <ArrowUp className="h-5 w-5" />
+        </button>
+      )}
     </div>
   );
 }
