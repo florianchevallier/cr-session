@@ -1,6 +1,7 @@
 import { useId, useMemo, useState } from "react";
 import { Check, ChevronDown, Mic, UserCheck } from "lucide-react";
 import Notice from "./ui/Notice";
+import NameDictionaryEditor from "./NameDictionaryEditor";
 import {
   createVoiceprintFromJob,
   jobAudioUrl,
@@ -158,6 +159,7 @@ function ReviewRow({
 }
 
 export default function AttributionReview({ review, onSubmitted }: AttributionReviewProps) {
+  const [names, setNames] = useState(review.nameDictionary ?? []);
   const [choices, setChoices] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -171,7 +173,12 @@ export default function AttributionReview({ review, onSubmitted }: AttributionRe
     setSubmitting(true);
     setError(null);
     try {
-      await submitJobReview(review.jobId, list);
+      const confirmed = names.map((entry) => {
+        const previous = review.nameDictionary?.find((n) => n.id === entry.id);
+        return { ...entry, status: "confirmed" as const, aliases: [...entry.aliases,
+          ...(previous && previous.canonical !== entry.canonical ? [{ name: previous.canonical, kind: "alias" as const, status: "confirmed" as const, reason: "Renommage humain", eventIds: [] }] : [])] };
+      });
+      await submitJobReview(review.jobId, list, confirmed);
       onSubmitted();
     } catch (err) {
       setError((err as Error).message);
@@ -183,13 +190,14 @@ export default function AttributionReview({ review, onSubmitted }: AttributionRe
     <section aria-labelledby="review-title" className="card space-y-4 p-5">
       <div>
         <h2 id="review-title" className="text-lg font-semibold text-ink">
-          Qui a fait quoi ? {review.items.length} passage{review.items.length > 1 ? "s" : ""} à confirmer
+          Vérifier la séance avant rédaction
         </h2>
         <p className="mt-1 text-sm text-ink-muted">
-          L'analyse hésite sur ces actions. {review.hasAudio ? "Écoute l'extrait, " : "Lis l'extrait, "}
-          corrige l'acteur si besoin, puis lance la rédaction. Ce que tu ne touches pas reste tel quel.
+          Vérifie les noms et les {review.items.length} attributions signalées. Tu peux consulter les sources avant de lancer la rédaction.
         </p>
       </div>
+
+      <NameDictionaryEditor names={names} onChange={setNames} evidence={review.nameEvidence} jobId={review.jobId} hasAudio={review.hasAudio} disabled={submitting} />
 
       <ol className="space-y-3">
         {review.items.map((item) => (
@@ -208,7 +216,7 @@ export default function AttributionReview({ review, onSubmitted }: AttributionRe
       <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
         <button type="button" onClick={() => submit([])} disabled={submitting} className="btn-secondary">
           <Check className="h-4 w-4" aria-hidden="true" />
-          Tout garder
+          Garder les attributions et valider les noms
         </button>
         <button type="button" onClick={() => submit(decisions)} disabled={submitting} className="btn-primary">
           <UserCheck className="h-4 w-4" aria-hidden="true" />

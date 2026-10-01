@@ -21,6 +21,7 @@ import {
 import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import type { ReactNode } from "react";
 import SceneEditor from "./SceneEditor";
+import ReportNamesPanel from "./ReportNamesPanel";
 import SceneBar, { SCENE_TYPES } from "./SceneBar";
 import Modal from "./ui/Modal";
 import { fetchScenes, updateScene, regenerateScene, rebuildReport, type SceneWithSummary } from "../lib/api";
@@ -901,6 +902,12 @@ export default function ReportViewer({
           )}
         </div>
       </header>
+
+      {reportId && <ReportNamesPanel key={reportId} reportId={reportId} onSaved={async (markdown) => {
+        onReportUpdate?.(markdown);
+        setEditingSceneId(null);
+        setScenes(await fetchScenes(reportId));
+      }} />}
 
       {onCorrection && (
         <p className="mb-6 text-sm text-ink-muted lg:hidden">

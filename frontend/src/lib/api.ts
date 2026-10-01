@@ -513,6 +513,8 @@ export interface ReviewDecision {
 }
 
 export interface PendingReview {
+  nameDictionary?: NameEntry[];
+  nameEvidence?: NameEvidence[];
   jobId: string;
   items: ReviewItem[];
   /** Personnages proposables comme acteur (PJ puis PNJ du casting). */
@@ -540,14 +542,34 @@ export async function fetchJobReview(jobId: string): Promise<PendingReview> {
   return jsonOrThrow(await fetch(`/api/jobs/${encodeURIComponent(jobId)}/review`));
 }
 
-export async function submitJobReview(jobId: string, decisions: ReviewDecision[]): Promise<void> {
+export async function submitJobReview(jobId: string, decisions: ReviewDecision[], nameDictionary?: NameEntry[]): Promise<void> {
   await jsonOrThrow(
     await fetch(`/api/jobs/${encodeURIComponent(jobId)}/review`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ decisions }),
+      body: JSON.stringify({ decisions, nameDictionary }),
     })
   );
+}
+
+export interface NameEntry {
+  assignedEventIds?: string[];
+  id: string;
+  canonical: string;
+  kind: "PJ" | "PNJ";
+  status: "proposed" | "confirmed";
+  aliases: { name: string; kind: "transcription" | "alias"; status: "proposed" | "confirmed" | "rejected"; reason: string; eventIds: string[] }[];
+}
+
+export interface NameEvidence { eventId: string; text: string; start: number; end: number }
+export interface ReportNames { nameDictionary: NameEntry[]; evidence: NameEvidence[]; warnings?: { name: string; reason: string }[] }
+export async function fetchReportNames(id: string): Promise<ReportNames> {
+  return jsonOrThrow(await fetch(`/api/reports/${encodeURIComponent(id)}/names`));
+}
+export async function saveReportNames(id: string, nameDictionary: NameEntry[]): Promise<{ reportMd: string }> {
+  return jsonOrThrow(await fetch(`/api/reports/${encodeURIComponent(id)}/names`, {
+    method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ nameDictionary }),
+  }));
 }
 
 export function jobAudioUrl(jobId: string, start: number, end: number): string {

@@ -103,6 +103,8 @@ export function useSSE() {
           review: {
             jobId: data.jobId as string,
             items: (data.items as PendingReview["items"]) ?? [],
+            nameDictionary: (data.nameDictionary as PendingReview["nameDictionary"]) ?? [],
+            nameEvidence: (data.nameEvidence as PendingReview["nameEvidence"]) ?? [],
             candidates: (data.candidates as string[]) ?? [],
             people: [...new Set(((data.people as string[]) ?? []).filter(Boolean))],
             hasAudio: data.hasAudio === true,

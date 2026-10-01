@@ -6,6 +6,7 @@ import { existsSync, readFileSync, rmSync } from "fs";
 import { bodyString, isAudioUpload, upload, uploadName } from "../lib/http.js";
 import { errorMessage } from "../lib/log.js";
 import type { ReviewDecision } from "../pipeline/ledger-pipeline.js";
+import { validateNameReview } from "../pipeline/name-dictionary.js";
 import { saveVoiceprintClip } from "../pipeline/voiceprint-store.js";
 import { parsePlayerDraft, type PlayerDraft } from "../report/types.js";
 import { streamAudioSegment } from "../tools/audio-windows.js";
@@ -121,6 +122,8 @@ jobsRouter.get("/:id/review", (req, res) => {
   res.json({
     jobId: job.id,
     items: job.review.items,
+    nameDictionary: job.review.nameDictionary,
+    nameEvidence: job.review.nameEvidence,
     candidates: job.review.candidates,
     people: tablePeople(job),
     hasAudio: !!job.input.audioPath,
@@ -131,6 +134,9 @@ jobsRouter.post("/:id/review", (req, res) => {
   const job = getJob(req.params.id);
   if (!job?.review) return void res.status(409).json({ message: "Aucune revue en attente pour ce traitement." });
   const known = new Set(job.review.items.map((i) => i.eventId));
+  let nameDictionary;
+  try { nameDictionary = validateNameReview(req.body?.nameDictionary ?? job.review.nameDictionary, job.review.nameDictionary, new Set(job.review.nameEvidence.map((e) => e.eventId))); }
+  catch (err) { return void res.status(400).json({ message: errorMessage(err, "Dictionnaire invalide.") }); }
   const raw: unknown[] = Array.isArray(req.body?.decisions) ? req.body.decisions : [];
   const decisions: ReviewDecision[] = raw
     .filter((d): d is Record<string, unknown> => !!d && typeof d === "object")
@@ -143,7 +149,7 @@ jobsRouter.post("/:id/review", (req, res) => {
   const { resolve: resolveReview } = job.review;
   job.review = undefined;
   setStatus(job, "running");
-  resolveReview(decisions);
+  resolveReview({ decisions, nameDictionary });
   res.json({ accepted: decisions.length });
 });
 

@@ -66,6 +66,7 @@ export interface ReportEntities {
 
 /** Ce qu'il faut pour (re)construire le markdown d'un compte-rendu. */
 export interface ReportState {
+  nameDictionary?: import("../pipeline/name-dictionary.js").NameDictionary;
   universeName: string;
   sessionTitle?: string;
   playerInfo: { playerName: string; characterName: string }[];

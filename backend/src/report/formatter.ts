@@ -1,4 +1,5 @@
 import type { ReportState } from "./types.js";
+import { normalizeReportState } from "./names.js";
 
 /** « Nom : description » → « **Nom** : description » (texte laissé tel quel sans séparateur). */
 function boldLabel(text: string): string {
@@ -9,6 +10,7 @@ function boldLabel(text: string): string {
 
 /** Assemble le markdown du compte-rendu (code pur, sans LLM). */
 export function formatReport(state: ReportState): string {
+  state = normalizeReportState(state);
   const orderedSummaries = [...state.sceneSummaries].sort(
     (a, b) => a.sceneId - b.sceneId
   );

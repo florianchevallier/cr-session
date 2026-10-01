@@ -20,6 +20,8 @@ import {
   renderReport,
   reportState,
   updateSceneNarrative,
+  reportNames,
+  updateReportNames,
   type StoredReport,
 } from "../report/editing.js";
 import type { PlayerDraft } from "../report/types.js";
@@ -58,6 +60,24 @@ reportsRouter.get("/:id/full", (req, res) => {
   const report = getReport(req.params.id);
   if (!report) return void res.status(404).json({ message: "Rapport introuvable." });
   res.json(report);
+});
+
+reportsRouter.get("/:id/names", (req, res) => {
+  const report = loadReport(req.params.id);
+  if (!report) return void res.status(404).json({ message: "Rapport introuvable." });
+  res.json(reportNames(report));
+});
+
+reportsRouter.put("/:id/names", (req, res) => {
+  const report = loadReport(req.params.id);
+  if (!report) return void res.status(404).json({ message: "Rapport introuvable." });
+  try {
+    const updated = updateReportNames(report, req.body?.nameDictionary);
+    insertCorrection({ id: randomUUID(), reportId: req.params.id, selectedText: "Noms et personnages", instruction: "Mise à jour du dictionnaire", previousReportMd: report.reportMd });
+    updateReportWorkflowState(req.params.id, updated.workflowState);
+    updateReportMd(req.params.id, updated.reportMd);
+    res.json(updated);
+  } catch (err) { res.status(400).json({ message: errorMessage(err, "Dictionnaire invalide.") }); }
 });
 
 reportsRouter.delete("/:id", (req, res) => {

@@ -3,6 +3,7 @@
  * Tout ce qui est attribué porte sa preuve (segments, citation) et une confiance.
  */
 import { z } from "zod/v4";
+import { NameDictionarySchema } from "./name-dictionary.js";
 
 export const VoiceMapSchema = z.object({
   voices: z.array(
@@ -42,7 +43,7 @@ export const EventSchema = z.object({
   confidence: z.number().describe("confiance dans l'attribution de l'acteur, 0-1"),
   evidence: z.string().describe("indices d'attribution : vocatif, voix, annonce de jet, sphère, réponse du MJ…"),
 });
-export type LedgerEvent = z.infer<typeof EventSchema> & { id: string; t: number; window: number };
+export type LedgerEvent = z.infer<typeof EventSchema> & { id: string; t: number; window: number; actorId?: string };
 
 export const WindowLedgerSchema = z.object({
   events: z.array(EventSchema),
@@ -62,6 +63,7 @@ export const WindowLedgerSchema = z.object({
 export type WindowLedger = z.infer<typeof WindowLedgerSchema>;
 
 export const ConsolidationSchema = z.object({
+  nameDictionary: NameDictionarySchema,
   title: z.string().describe("titre évocateur de la séance"),
   chapters: z.array(
     z.object({

@@ -10,6 +10,8 @@ import { dataDir } from "../config/database.js";
 import { AUDIO_EXTENSIONS, initSSE, writeSSEEvent } from "../lib/http.js";
 import type { PlayerDraft } from "../report/types.js";
 import type { ReviewDecision, ReviewItem } from "../pipeline/ledger-pipeline.js";
+import type { ReviewResponse } from "../pipeline/ledger-job.js";
+import type { NameDictionary, NameEvidence } from "../pipeline/name-dictionary.js";
 
 export const jobsDir = resolve(dataDir, "jobs");
 mkdirSync(jobsDir, { recursive: true });
@@ -50,7 +52,7 @@ export interface Job {
   error: string | null;
   /** Audio converti (mp3 16 kHz) : écoute des extraits et échantillons de voix. */
   playableAudioPath?: string;
-  review?: { items: ReviewItem[]; candidates: string[]; resolve: (d: ReviewDecision[]) => void };
+  review?: { items: ReviewItem[]; candidates: string[]; nameDictionary: NameDictionary; nameEvidence: NameEvidence[]; resolve: (d: ReviewResponse) => void };
 }
 
 const jobs = new Map<string, Job>();

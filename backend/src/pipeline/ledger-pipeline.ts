@@ -9,6 +9,7 @@
  */
 import { mkdir, readFile, writeFile } from "fs/promises";
 import { existsSync } from "fs";
+import { z } from "zod/v4";
 import { resolve } from "path";
 import type { WhisperResult, WhisperSegment } from "../tools/transcription-client.js";
 import { splitAudio, formatClock } from "../tools/audio-windows.js";
@@ -16,8 +17,10 @@ import { namedTranscript } from "../tools/transcript-input.js";
 import { uploadAudio, audioPart, generateJson, generateText, type UploadedAudio } from "../config/genai.js";
 import { ATTRIBUTION_RULES } from "../config/report-style.js";
 import { formatReport } from "../report/formatter.js";
+import { normalizeReportState } from "../report/names.js";
 import type { ReportState, SceneMeta, SceneSummary } from "../report/types.js";
 import { castText, castPeople, type CastSheet } from "./cast.js";
+import { dictionaryText, normalizeEvents, seedDictionary, type NameDictionary } from "./name-dictionary.js";
 import {
   VoiceMapSchema,
   WindowLedgerSchema,
@@ -56,6 +59,7 @@ export interface LedgerPipelineInput {
 }
 
 export interface SessionAnalysis {
+  nameDictionary?: NameDictionary;
   voiceMap: VoiceMap;
   events: LedgerEvent[];
   consolidation: Consolidation;
@@ -303,7 +307,14 @@ async function consolidate(input: LedgerPipelineInput, events: LedgerEvent[]): P
       "2) Corrige les incohérences d'attribution visibles à l'échelle de la séance (un PJ absent qui agit, une action " +
       "d'un PNJ donnée à un PJ, un même geste attribué à deux personnages, noms confondus) — uniquement avec une raison " +
       "solide tirée du registre ; retire les doublons et le hors-jeu. 3) Liste les PNJ de chaque chapitre avec leur rôle, " +
-      "et 2 à 4 notes techniques (règles, mécaniques, univers) par chapitre. 4) Normalise les variantes de noms.",
+      "et 2 à 4 notes techniques (règles, mécaniques, univers) par chapitre. " +
+      "4) Construis nameDictionary : une identité stable par personnage PJ/PNJ avec nom canonique et variantes observées. " +
+      "Chaque variante porte sa nature (transcription ou alias), une justification et les eventIds sources. " +
+      "Tous les statuts sont proposed : l'humain validera. Le casting humain fait autorité. " +
+      "Deux noms similaires ou deux personnages du même rôle ne sont PAS une preuve d'identité. " +
+      "Griffe-Rouge et Croc Écarlate sont distincts ; Stan et Ekila Stan sont distincts. " +
+      "En cas de doute, garde deux entrées séparées. Ne corrige pas les identités via fixes : réserve fixes aux attributions. " +
+      "canonicalNames reste une liste de propositions orthographiques, sans application automatique.",
     parts: [
       `CASTING :\n${castText(input.cast)}`,
       `CONTEXTE (session précédente) :\n${input.sessionHistory.slice(-20000)}`,
@@ -314,7 +325,6 @@ async function consolidate(input: LedgerPipelineInput, events: LedgerEvent[]): P
 }
 
 function applyFixes(events: LedgerEvent[], c: Consolidation): LedgerEvent[] {
-  const canon = new Map(c.canonicalNames.map((n) => [n.variant.toLowerCase(), n.canonical]));
   const fixes = new Map(c.fixes.map((f) => [f.eventId, f]));
   return events
     .filter((e) => !fixes.get(e.id)?.drop)
@@ -323,7 +333,7 @@ function applyFixes(events: LedgerEvent[], c: Consolidation): LedgerEvent[] {
       const actor = f?.actor?.trim() || e.actor;
       return {
         ...e,
-        actor: canon.get(actor.toLowerCase()) ?? actor,
+        actor,
         status: (f?.status?.trim() as LedgerEvent["status"]) || e.status,
       };
     });
@@ -383,10 +393,11 @@ export async function analyzeSession(input: LedgerPipelineInput): Promise<Sessio
   progress("ledger:done", { events: events.length, speakerCorrections: speakerCorrections.length });
 
   progress("consolidate");
-  const consolidation = await cached(resolve(input.cacheDir, "consolidation.json"), () => consolidate(input, events));
+  const consolidation = await cached(resolve(input.cacheDir, "consolidation-names-v1.json"), () => consolidate(input, events));
   progress("consolidate:done", { chapters: consolidation.chapters.length, fixes: consolidation.fixes.length });
 
-  return { voiceMap, events: applyFixes(events, consolidation), consolidation, speakerCorrections };
+  return { voiceMap, events: applyFixes(events, consolidation), consolidation, speakerCorrections,
+    nameDictionary: seedDictionary(input.cast, events, consolidation.nameDictionary) };
 }
 
 // ── Revue humaine ────────────────────────────────────────────────────────────
@@ -498,7 +509,8 @@ async function writeChapter(
   index: number,
   events: LedgerEvent[],
   allTitles: string[],
-  issues?: string
+  issues?: string,
+  names: NameDictionary = []
 ): Promise<string> {
   return generateText({
     task: "writer",
@@ -515,6 +527,7 @@ async function writeChapter(
       "sans titre ni encadrés : ils sont ajoutés automatiquement.\n\n" + ATTRIBUTION_RULES,
     parts: [
       `CASTING :\n${castText(input.cast)}`,
+      dictionaryText(names),
       input.sessionHistory.trim() ? `EXEMPLE DE STYLE (session précédente) :\n${input.sessionHistory.slice(-15000)}` : "",
       `PLAN DE LA SÉANCE : ${allTitles.map((t, i) => `${i + 1}. ${t}`).join(" | ")}`,
       `CHAPITRE ${index + 1} : ${chapter.title} — lieu : ${chapter.location}`,
@@ -524,7 +537,7 @@ async function writeChapter(
   });
 }
 
-async function verifyChapter(input: LedgerPipelineInput, text: string, events: LedgerEvent[]) {
+async function verifyChapter(input: LedgerPipelineInput, text: string, events: LedgerEvent[], names: NameDictionary = []) {
   return generateJson({
     task: "verifier",
     model: input.model,
@@ -536,8 +549,9 @@ async function verifyChapter(input: LedgerPipelineInput, text: string, events: L
       "l'ambiance et les descriptions ne comptent pas, seulement les actions et résultats), une intention devient un fait " +
       "(intention_comme_fait), un PJ absent agit (personnage_absent), le MJ/les joueurs réels sont mentionnés (mj_mentionne), " +
       "ou un événement du registre avec un acteur PJ ou un jet n'est pas raconté (omis : mets l'id de l'événement dans sentence). " +
-      "Ne signale rien d'autre. Liste vide si tout est correct.",
-    parts: [`CASTING :\n${castText(input.cast)}`, `REGISTRE :\n${chapterEventsText(events)}`, `CHAPITRE :\n${text}`],
+      "Signale aussi comme non_soutenu un nom inventé, une variante non validée substituée à un personnage, " +
+      "ou une fusion d'identités distinctes. Liste vide si tout est correct.",
+    parts: [dictionaryText(names), `CASTING :\n${castText(input.cast)}`, `REGISTRE :\n${chapterEventsText(events)}`, `CHAPITRE :\n${text}`],
   });
 }
 
@@ -572,6 +586,9 @@ function speakerNames(input: LedgerPipelineInput, analysis: SessionAnalysis): Ma
 }
 
 export async function writeSession(input: LedgerPipelineInput, analysis: SessionAnalysis): Promise<SessionOutput> {
+  const rawEvents = analysis.events;
+  const names = analysis.nameDictionary ?? seedDictionary(input.cast, rawEvents);
+  analysis = { ...analysis, events: normalizeEvents(rawEvents, names) };
   const progress = progressOf(input);
   const { consolidation } = analysis;
   const byId = new Map(analysis.events.map((e) => [e.id, e]));
@@ -580,12 +597,13 @@ export async function writeSession(input: LedgerPipelineInput, analysis: Session
   const chapters = await mapLimit(consolidation.chapters, 3, async (chapter, i) => {
     const events = chapter.eventIds.map((id) => byId.get(id)).filter((e): e is LedgerEvent => !!e);
     progress("write", { chapter: i + 1, of: consolidation.chapters.length, title: chapter.title });
-    let text = await writeChapter(input, chapter, i, events, titles);
-    const check = await verifyChapter(input, text, events);
+    let text = await writeChapter(input, chapter, i, events, titles, undefined, names);
+    let check = await verifyChapter(input, text, events, names);
     if (check.issues.length) {
       progress("rewrite", { chapter: i + 1, issues: check.issues.length });
       const issues = check.issues.map((x) => `- « ${x.sentence} » → ${x.problem} : ${x.fix}`).join("\n");
-      text = await writeChapter(input, chapter, i, events, titles, issues);
+      text = await writeChapter(input, chapter, i, events, titles, issues, names);
+      check = await verifyChapter(input, text, events, names);
     }
     progress("write:done", { chapter: i + 1, issues: check.issues.length });
     return { chapter, events, text: text.trim(), issues: check.issues };
@@ -615,7 +633,8 @@ export async function writeSession(input: LedgerPipelineInput, analysis: Session
   for (const c of consolidation.chapters) for (const n of c.npcs) if (!npcs.has(n.name)) npcs.set(n.name, n.role);
   const playerInfo = input.cast.players.map((p) => ({ playerName: p.playerName, characterName: p.characterName }));
 
-  const state: ReportState = {
+  const state: ReportState = normalizeReportState({
+    nameDictionary: names,
     universeName: input.universeName ?? "",
     sessionTitle: consolidation.title,
     playerInfo,
@@ -627,17 +646,33 @@ export async function writeSession(input: LedgerPipelineInput, analysis: Session
       locations: [...new Set(consolidation.chapters.map((c) => c.location).filter(Boolean))],
       items: [],
     },
-  };
+  });
 
+  progress("names:check");
+  const report = formatReport(state);
+  const nameCheck = await generateJson({
+    task: "verifier", model: input.model, temperature: 0,
+    schema: z.object({ warnings: z.array(z.object({ name: z.string(), reason: z.string() })) }),
+    system: "Tu contrôles UNIQUEMENT la cohérence des noms d'un compte rendu assemblé (récit, résumé, jets, notes, annexes). " +
+      "Signale un nom propre de personnage nouveau introduit sans preuve dans le registre, une variante incohérente " +
+      "ou une fusion d'identités refusée/non validée. Ne propose pas de fusion par simple similarité de nom ou de rôle. " +
+      "Les personnages anonymes décrits par leur fonction ne sont pas des erreurs. Les variantes non validées présentes " +
+      "dans le registre peuvent désigner des personnages distincts : leur seule présence n'est pas une erreur. " +
+      "Ne corrige pas les faits ; retourne seulement des avertissements précis, liste vide si cohérent.",
+    parts: [dictionaryText(names), `REGISTRE SOURCE :\n${chapterEventsText(rawEvents)}`, `COMPTE RENDU COMPLET :\n${report}`],
+  });
+  progress("names:done", { warnings: nameCheck.warnings.length });
   return {
-    report: formatReport(state),
+    report,
     preprocessedTranscript: namedTranscript(segmentsOf(input), speakerNames(input, analysis)),
     workflowState: {
       ...state,
+      nameWarnings: nameCheck.warnings,
       speakerMap: Object.fromEntries(analysis.voiceMap.voices.map((v) => [v.speakerId, v.mainPerson])),
       ledger: {
         voiceMap: analysis.voiceMap,
         events: analysis.events,
+        rawEvents,
         speakerCorrections: analysis.speakerCorrections,
         verification: chapters.map((c, i) => ({ sceneId: i + 1, issues: c.issues })),
       },
@@ -655,6 +690,7 @@ export async function runLedgerPipeline(input: LedgerPipelineInput) {
 // ── Réécriture d'un chapitre (depuis l'éditeur de rapport) ────────────────────
 
 export interface RewriteChapterInput {
+  nameDictionary?: NameDictionary;
   cast: CastSheet;
   sessionHistory: string;
   title: string;
@@ -690,13 +726,14 @@ export async function rewriteChapter(input: RewriteChapterInput): Promise<{ text
     : undefined;
 
   if (input.events.length) {
-    let text = await writeChapter(pipelineInput, chapter, index, input.events, input.allTitles, instruction);
-    const check = await verifyChapter(pipelineInput, text, input.events);
+    input = { ...input, events: normalizeEvents(input.events, input.nameDictionary ?? []) };
+    let text = await writeChapter(pipelineInput, chapter, index, input.events, input.allTitles, instruction, input.nameDictionary);
+    const check = await verifyChapter(pipelineInput, text, input.events, input.nameDictionary);
     if (check.issues.length) {
       const issues = [instruction, ...check.issues.map((x) => `- « ${x.sentence} » → ${x.problem} : ${x.fix}`)]
         .filter(Boolean)
         .join("\n");
-      text = await writeChapter(pipelineInput, chapter, index, input.events, input.allTitles, issues);
+      text = await writeChapter(pipelineInput, chapter, index, input.events, input.allTitles, issues, input.nameDictionary);
     }
     return { text: text.trim(), metadata: eventMetadata(input.events) };
   }
@@ -711,6 +748,7 @@ export async function rewriteChapter(input: RewriteChapterInput): Promise<{ text
       "Écris UNIQUEMENT la narration (paragraphes), sans titre ni encadrés.\n\n" + ATTRIBUTION_RULES,
     parts: [
       `CASTING :\n${castText(input.cast)}`,
+      dictionaryText(input.nameDictionary),
       input.sessionHistory.trim() ? `EXEMPLE DE STYLE (session précédente) :\n${input.sessionHistory.slice(-15000)}` : "",
       `CHAPITRE : ${input.title}${input.location ? ` — lieu : ${input.location}` : ""}`,
       `TRANSCRIPT DU CHAPITRE :\n${input.transcriptExcerpt}`,

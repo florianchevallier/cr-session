@@ -8,8 +8,10 @@ import { ATTRIBUTION_RULES } from "../config/report-style.js";
 import { buildCastSheet, castText } from "../pipeline/cast.js";
 import { rewriteChapter } from "../pipeline/ledger-pipeline.js";
 import type { LedgerEvent } from "../pipeline/ledger-schemas.js";
+import { dictionaryText, normalizeEvents, nameNormalizer, seedDictionary, validateDictionary, validateNameReview, type NameDictionary } from "../pipeline/name-dictionary.js";
 import { extractSceneText } from "../tools/transcript-input.js";
 import { formatReport } from "./formatter.js";
+import { normalizeReportMarkdown, normalizeReportState } from "./names.js";
 import type { PlayerDraft, ReportState, SceneMeta, SceneSummary } from "./types.js";
 
 export interface StoredReport {
@@ -103,6 +105,7 @@ export async function correctPassage(
       ATTRIBUTION_RULES,
     parts: [
       `CASTING :\n${castText(cast)}`,
+      dictionaryText(state.nameDictionary),
       `SECTION À MODIFIER :\n${section.text}`,
       transcript ? `TRANSCRIPT DE LA SCÈNE « ${scene!.title} » :\n${transcript}` : "",
       `PASSAGE SÉLECTIONNÉ : « ${selectedText} »`,
@@ -118,6 +121,7 @@ export async function correctPassage(
 // ── Scène éditée à la main ───────────────────────────────────────────────────
 
 const SceneMetadataSchema = z.object({
+  synopsis: z.string().describe("résumé factuel de la scène en deux phrases, avec les noms du dictionnaire"),
   diceRolls: z
     .array(
       z.object({
@@ -152,6 +156,7 @@ export async function updateSceneNarrative(report: StoredReport, sceneId: number
         "(il vient d'être corrigé par l'utilisateur). N'invente rien qui ne soit dans le récit.",
       parts: [
         `CASTING :\n${castText(buildCastSheet(report.players ?? []))}`,
+        dictionaryText(state.nameDictionary),
         `RÉCIT DE LA SCÈNE :\n${narrativeSummary}`,
         transcript ? `TRANSCRIPT (référence pour les valeurs de dés) :\n${transcript}` : "",
       ].filter(Boolean),
@@ -162,7 +167,7 @@ export async function updateSceneNarrative(report: StoredReport, sceneId: number
 
   const updated: SceneSummary = { ...state.sceneSummaries[index], narrativeSummary, ...(metadata ?? {}) };
   const sceneSummaries = state.sceneSummaries.map((s, i) => (i === index ? updated : s));
-  const next = { ...state, sceneSummaries };
+  const next = { ...state, sceneSummaries, scenes: state.scenes.map((s) => s.id === sceneId && metadata ? { ...s, summary: metadata.synopsis } : s) };
   return { workflowState: next, reportMd: renderReport(next), updatedSummary: updated };
 }
 
@@ -173,10 +178,12 @@ export async function regenerateScene(report: StoredReport, sceneId: number, ins
   const scene = state.scenes.find((s) => s.id === sceneId);
   if (!scene) return null;
 
-  const ledgerEvents = ((state.ledger as { events?: LedgerEvent[] } | undefined)?.events ?? []).filter((e) =>
+  const savedLedger = state.ledger as { rawEvents?: LedgerEvent[]; events?: LedgerEvent[] } | undefined;
+  const ledgerEvents = (savedLedger?.rawEvents ?? savedLedger?.events ?? []).filter((e) =>
     scene.eventIds?.includes(e.id)
   );
   const { text, metadata } = await rewriteChapter({
+    nameDictionary: state.nameDictionary,
     cast: buildCastSheet(report.players ?? []),
     sessionHistory: report.sessionHistory ?? "",
     title: scene.title,
@@ -188,17 +195,64 @@ export async function regenerateScene(report: StoredReport, sceneId: number, ins
   });
 
   const existing = state.sceneSummaries.find((s) => s.sceneId === sceneId);
+  const refreshed = await generateJson({
+    task: "edit", temperature: 0, schema: SceneMetadataSchema,
+    system: "Extrais le résumé et les encadrés du récit régénéré, qui fait foi. Respecte le dictionnaire humain, " +
+      "n'invente aucun personnage ni fait. PNJ au format Nom : rôle ; notes techniques strictement fondées sur ce récit.",
+    parts: [dictionaryText(state.nameDictionary), `RÉCIT :\n${text}`],
+  });
   const regenerated: SceneSummary = {
     sceneId,
     narrativeSummary: text,
-    keyEvents: metadata?.keyEvents ?? existing?.keyEvents ?? [],
-    diceRolls: metadata?.diceRolls ?? existing?.diceRolls ?? [],
-    npcsInvolved: existing?.npcsInvolved ?? [],
-    technicalNotes: existing?.technicalNotes ?? [],
+    keyEvents: metadata?.keyEvents ?? refreshed.keyEvents,
+    diceRolls: metadata?.diceRolls ?? refreshed.diceRolls,
+    npcsInvolved: refreshed.npcsInvolved,
+    technicalNotes: refreshed.technicalNotes,
   };
   const sceneSummaries = existing
     ? state.sceneSummaries.map((s) => (s.sceneId === sceneId ? regenerated : s))
     : [...state.sceneSummaries, regenerated].sort((a, b) => a.sceneId - b.sceneId);
-  const next = { ...state, sceneSummaries };
+  const npcs = new Map<string, { name: string; role: string }>();
+  for (const summary of sceneSummaries) for (const npc of summary.npcsInvolved) {
+    const split = npc.indexOf(" : ");
+    const name = split < 0 ? npc : npc.slice(0, split);
+    npcs.set(name, { name, role: split < 0 ? "" : npc.slice(split + 3) });
+  }
+  const next = normalizeReportState({ ...state, sceneSummaries,
+    scenes: state.scenes.map((s) => s.id === sceneId ? { ...s, summary: refreshed.synopsis } : s),
+    entities: { ...state.entities, npcs: [...npcs.values()] } });
   return { workflowState: next, reportMd: renderReport(next), regeneratedSummary: regenerated };
+}
+
+export function reportNames(report: StoredReport) {
+  const state = reportState(report);
+  const ledger = state.ledger as { rawEvents?: LedgerEvent[]; events?: LedgerEvent[] } | undefined;
+  const events = ledger?.rawEvents ?? ledger?.events ?? [];
+  const dictionary = state.nameDictionary ?? seedDictionary(buildCastSheet([
+    ...report.players, ...state.entities.npcs.map((n) => ({ playerName: "", characterName: n.name, role: "npc" as const }))
+  ]), events, state.entities.npcs.map((n, i) => ({ id: `npc-${i}`, canonical: n.name, kind: "PNJ", status: "proposed", aliases: [] })));
+  return { nameDictionary: dictionary, warnings: (state.nameWarnings as { name: string; reason: string }[] | undefined) ?? [], evidence: events.map((e) => ({ eventId: e.id, text: `${e.actor} : ${e.action}\n${e.quote}`, start: e.t, end: e.t + 10 })) };
+}
+
+export function updateReportNames(report: StoredReport, value: unknown) {
+  const state = reportState(report);
+  const current = reportNames(report);
+  const names = validateNameReview(value, current.nameDictionary, new Set(current.evidence.map((e) => e.eventId)));
+  const transitions: NameDictionary = names.map((n) => ({ ...n, aliases: [...n.aliases,
+    ...current.nameDictionary.filter((old) => old.id === n.id && old.canonical !== n.canonical)
+      .map((old) => ({ name: old.canonical, kind: "alias" as const, status: "confirmed" as const, reason: "Renommage humain", eventIds: [] }))] }));
+  const normalize = nameNormalizer(transitions);
+  validateDictionary(transitions);
+  const next: ReportState & Record<string, unknown> = { ...state, nameDictionary: transitions,
+    sessionTitle: state.sessionTitle ? normalize(state.sessionTitle) : undefined,
+    scenes: state.scenes.map((s) => ({ ...s, title: normalize(s.title), summary: s.summary ? normalize(s.summary) : undefined })),
+    sceneSummaries: state.sceneSummaries.map((s) => ({ ...s, narrativeSummary: normalize(s.narrativeSummary),
+      keyEvents: s.keyEvents.map(normalize), npcsInvolved: s.npcsInvolved.map(normalize), technicalNotes: s.technicalNotes?.map(normalize),
+      diceRolls: s.diceRolls.map((r) => ({ ...r, character: normalize(r.character), context: normalize(r.context) })) })),
+    entities: { ...state.entities, npcs: [...new Map(state.entities.npcs.map((n) => { const name = normalize(n.name); return [name, { ...n, name, role: n.role ? normalize(n.role) : undefined }] as const; })).values()] },
+  };
+  const ledger = state.ledger as { rawEvents?: LedgerEvent[]; events?: LedgerEvent[] } | undefined;
+  if (ledger) next.ledger = { ...ledger, rawEvents: ledger.rawEvents ?? ledger.events, events: normalizeEvents(ledger.rawEvents ?? ledger.events ?? [], transitions) };
+  // Transform the current Markdown too: targeted corrections may not exist in scene state.
+  return { workflowState: normalizeReportState(next), reportMd: normalizeReportMarkdown(report.reportMd, transitions), nameDictionary: transitions };
 }

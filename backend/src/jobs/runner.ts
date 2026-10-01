@@ -9,6 +9,7 @@ import { trackUsage, type UsageReport } from "../config/genai.js";
 import { errorMessage, log } from "../lib/log.js";
 import { runLedgerJob } from "../pipeline/ledger-job.js";
 import type { ReviewDecision, VoiceSample } from "../pipeline/ledger-pipeline.js";
+import type { ReviewResponse } from "../pipeline/ledger-job.js";
 import { suggestVoiceClips } from "../pipeline/voice-suggestions.js";
 import { proposeVoiceprints } from "../pipeline/voiceprint-store.js";
 import { safeUniverseId } from "../routes/universes.js";
@@ -107,11 +108,11 @@ export async function runJob(job: Job): Promise<void> {
           onAudioReady: (path) => {
             job.playableAudioPath = path;
           },
-          review: (items, candidates) =>
-            new Promise<ReviewDecision[]>((resolveReview) => {
-              job.review = { items, candidates, resolve: resolveReview };
+          review: (items, candidates, nameDictionary, nameEvidence) =>
+            new Promise<ReviewResponse>((resolveReview) => {
+              job.review = { items, candidates, nameDictionary, nameEvidence, resolve: resolveReview };
               setStatus(job, "review");
-              publish(job, "review", { jobId: job.id, items, candidates, people, hasAudio: !!input.audioPath });
+              publish(job, "review", { jobId: job.id, items, candidates, nameDictionary, nameEvidence, people, hasAudio: !!input.audioPath });
             }),
         }
       )
