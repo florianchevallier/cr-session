@@ -13,10 +13,11 @@ const STAGES = [
   { id: "upload", name: "Envoi de l'enregistrement", optional: true, weight: 8 },
   { id: "transcribe", name: "Transcription de l'enregistrement", optional: true, weight: 30 },
   { id: "voices", name: "Qui parle ? Identification des voix", optional: false, weight: 4 },
-  { id: "ledger", name: "Écoute de la séance : qui fait quoi", optional: false, weight: 36 },
+  { id: "ledger", name: "Écoute de la séance : qui fait quoi", optional: false, weight: 32 },
   { id: "consolidate", name: "Découpage en chapitres", optional: false, weight: 5 },
   { id: "review", name: "Ta vérification des passages douteux", optional: true, weight: 0 },
-  { id: "write", name: "Rédaction et relecture des chapitres", optional: false, weight: 22 },
+  { id: "write", name: "Rédaction et relecture des chapitres", optional: false, weight: 18 },
+  { id: "audit", name: "Réécoute complète et correction", optional: true, weight: 8 },
   { id: "format", name: "Compte-rendu prêt", optional: false, weight: 3 },
 ] as const;
 

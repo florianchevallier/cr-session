@@ -4,7 +4,7 @@
  *   tsx scripts/run-variant.ts B   → audio brut envoyé en un seul appel à Gemini
  *   tsx scripts/run-variant.ts C   → nouveau pipeline registre (audio + transcript)
  *
- * Options : --session <id>, --model <gemini-model>, --name <nom de sortie>
+ * Options : --session <id>, --model <gemini-model>, --name <nom de sortie>, --no-audit (C sans audit audio final)
  * Sortie : eval/data/results/<nom>.md, à noter ensuite avec eval-attribution.ts judge.
  */
 import { readFile, writeFile, mkdir } from "fs/promises";
@@ -27,9 +27,10 @@ const flag = (name: string) => {
   const i = args.indexOf(`--${name}`);
   return i >= 0 ? args.splice(i, 2)[1] : undefined;
 };
+const noAudit = args.includes("--no-audit");
 const session = flag("session") ?? "mage-session";
 const model = flag("model");
-const variant = args[0];
+const variant = args.filter((a) => a !== "--no-audit")[0];
 const name = flag("name") ?? `${session === "mage-session" ? "" : session + "-"}${variant}${model ? "-" + model : ""}`;
 
 const universeContext = await readFile(resolve("src/config/universes/mage.md"), "utf-8");
@@ -67,18 +68,25 @@ async function runB(): Promise<string> {
 
 async function runC(): Promise<string> {
   const { runLedgerPipeline } = await import("../src/pipeline/ledger-pipeline.js");
-  const whisper = await loadWhisper(session);
-  const result = await runLedgerPipeline({
-    whisper,
+  const { auditSession } = await import("../src/pipeline/audio-audit.js");
+  const input = {
+    whisper: await loadWhisper(session),
     audioPath: expandHome(cast.audio),
     cast,
     universeContext,
     sessionHistory,
     model,
     cacheDir: resolve(RESULTS_DIR, `cache-${name}`),
-  });
+  };
+  const result = await runLedgerPipeline(input);
   await writeFile(resolve(RESULTS_DIR, `${name}.ledger.json`), JSON.stringify(result.ledger, null, 2));
-  return result.report;
+  if (noAudit) return result.report;
+  // Même rédaction avant/après audit : on mesure l'audit sans le bruit de la génération.
+  await writeFile(resolve(RESULTS_DIR, `${name}.pre-audit.md`), result.report);
+  const mp3 = await transcodeForGemini(input.audioPath, resolve(DATA_DIR, `${session}.16k.mp3`));
+  const audited = await auditSession({ ...input, audioPath: mp3 }, result.output);
+  await writeFile(resolve(RESULTS_DIR, `${name}.audit.json`), JSON.stringify(audited.workflowState.audit, null, 2));
+  return audited.report;
 }
 
 const runners: Record<string, () => Promise<string>> = { B: runB, C: runC };

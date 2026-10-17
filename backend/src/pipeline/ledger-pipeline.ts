@@ -104,14 +104,14 @@ function segmentLine(seg: WhisperSegment, id: number, timed: boolean): string {
   return `#${id}${clock} ${seg.speaker ?? "SPEAKER_?"}${mixed}: ${seg.text.trim()}`;
 }
 
-async function cached<T>(path: string, compute: () => Promise<T>): Promise<T> {
+export async function cached<T>(path: string, compute: () => Promise<T>): Promise<T> {
   if (existsSync(path)) return JSON.parse(await readFile(path, "utf-8"));
   const value = await compute();
   await writeFile(path, JSON.stringify(value, null, 1));
   return value;
 }
 
-async function mapLimit<T, R>(items: T[], limit: number, fn: (t: T, i: number) => Promise<R>): Promise<R[]> {
+export async function mapLimit<T, R>(items: T[], limit: number, fn: (t: T, i: number) => Promise<R>): Promise<R[]> {
   const results: R[] = new Array(items.length);
   let next = 0;
   await Promise.all(

@@ -78,13 +78,17 @@ function recordUsage(
   );
 }
 
-export type GenaiTask = "ledger" | "consolidate" | "writer" | "verifier" | "edit" | "eval" | "audioReport";
+export type GenaiTask = "ledger" | "consolidate" | "writer" | "verifier" | "edit" | "eval" | "audioReport" | "audit";
 
 const DEFAULT_MODEL = "gemini-3.8-flash";
+
+/** Modèle par défaut d'une tâche quand ni GEMINI_MODEL_<TASK> ni GEMINI_MODEL_DEFAULT ne le fixent. */
+const TASK_DEFAULTS: Partial<Record<GenaiTask, string>> = { audit: "gemini-flash-latest" };
 
 export function genaiModel(task: GenaiTask): string {
   return (
     process.env[`GEMINI_MODEL_${task.toUpperCase()}`]?.trim() ||
+    TASK_DEFAULTS[task] ||
     process.env.GEMINI_MODEL_DEFAULT?.trim() ||
     DEFAULT_MODEL
   );

@@ -21,6 +21,7 @@ import {
   type SessionOutput,
   type VoiceSample,
 } from "./ledger-pipeline.js";
+import { auditSession } from "./audio-audit.js";
 
 export interface LedgerJobInput {
   jobDir: string;
@@ -60,6 +61,7 @@ const STEP_LABELS: Record<string, string> = {
   consolidate: "Consolidation de la séance",
   review: "Vérification des attributions incertaines",
   write: "Rédaction des chapitres",
+  audit: "Audit contre l'audio",
   format: "Mise en forme du compte-rendu",
 };
 
@@ -131,6 +133,12 @@ export async function runLedgerJob(input: LedgerJobInput, hooks: LedgerJobHooks)
         case "names:done":
           hooks.progress("write", `Contrôle global des noms — ${detail?.warnings} point(s) à revoir`);
           break;
+        case "audit:rewrite":
+          hooks.progress("audit", `${STEP_LABELS.audit} — correction du chapitre ${detail?.chapter}/${detail?.of}`);
+          break;
+        case "audit:done":
+          hooks.step("audit", `${STEP_LABELS.audit} — ${detail?.corrections} erreur(s), ${detail?.scenes} chapitre(s) corrigé(s)`, "complete");
+          break;
       }
     },
   };
@@ -157,8 +165,13 @@ export async function runLedgerJob(input: LedgerJobInput, hooks: LedgerJobHooks)
   }
 
   hooks.step("write", STEP_LABELS.write, "start");
-  const output = await writeSession(pipelineInput, analysis);
+  let output = await writeSession(pipelineInput, analysis);
   hooks.step("write", STEP_LABELS.write, "complete");
+
+  if (playableAudioPath) {
+    hooks.step("audit", STEP_LABELS.audit, "start");
+    output = await auditSession(pipelineInput, output);
+  }
 
   return { ...output, rawTranscript, playableAudioPath };
 }

@@ -138,7 +138,12 @@ const SceneMetadataSchema = z.object({
 });
 
 /** Met à jour la narration d'une scène et ré-extrait ses encadrés depuis le texte édité. */
-export async function updateSceneNarrative(report: StoredReport, sceneId: number, narrativeSummary: string) {
+export async function updateSceneNarrative(
+  report: StoredReport,
+  sceneId: number,
+  narrativeSummary: string,
+  cast = buildCastSheet(report.players ?? [])
+) {
   const state = reportState(report);
   const index = state.sceneSummaries.findIndex((s) => s.sceneId === sceneId);
   if (index === -1) return null;
@@ -155,7 +160,7 @@ export async function updateSceneNarrative(report: StoredReport, sceneId: number
         "Tu extrais les encadrés d'une scène de compte-rendu de jeu de rôle à partir de son récit, qui fait foi " +
         "(il vient d'être corrigé par l'utilisateur). N'invente rien qui ne soit dans le récit.",
       parts: [
-        `CASTING :\n${castText(buildCastSheet(report.players ?? []))}`,
+        `CASTING :\n${castText(cast)}`,
         dictionaryText(state.nameDictionary),
         `RÉCIT DE LA SCÈNE :\n${narrativeSummary}`,
         transcript ? `TRANSCRIPT (référence pour les valeurs de dés) :\n${transcript}` : "",

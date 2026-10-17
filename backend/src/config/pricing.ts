@@ -15,6 +15,8 @@ interface Price {
 
 const PRICES: Record<string, Price> = {
   "gemini-3.8-flash": { input: 0.75, output: 3.75, from: { date: "2027-01-01", input: 1.5, output: 7.5 } },
+  // ponytail: alias « dernière Flash » supposé = 3.8 Flash ; à revoir si Google le fait pointer ailleurs.
+  "gemini-flash-latest": { input: 0.75, output: 3.75, from: { date: "2027-01-01", input: 1.5, output: 7.5 } },
   "gemini-3.5-flash": { input: 1.5, output: 9 },
   "gemini-3.5-flash-lite": { input: 0.3, output: 2.5 },
   "gemini-3.1-pro-preview": { input: 2, output: 12, above: { tokens: 200_000, input: 4, output: 18 } },
